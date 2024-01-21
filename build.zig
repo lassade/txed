@@ -31,9 +31,12 @@ pub fn build(b: *std.Build) !void {
     // exe.linkSystemLibrary("dxgi");
     // exe.linkSystemLibrary("d3dcompiler");
 
-    const dxc_step = b.step("dxc", "Build shaders");
-    dxc_step.dependOn(wsdk.compileShader(b, .{ .path = "src/shaders.hlsl" }, "shader.vs.cso", "VSMain", .vs_6_0, &.{}));
-    dxc_step.dependOn(wsdk.compileShader(b, .{ .path = "src/shaders.hlsl" }, "shader.ps.cso", "PSMain", .ps_6_0, &.{}));
+    // const dxc_step = b.step("dxc", "Build shaders");
+    // dxc_step.dependOn(wsdk.compileShader(b, .{ .path = "src/shaders.hlsl" }, "shader.vs.cso", "VSMain", .vs_6_0, &.{}));
+    // dxc_step.dependOn(wsdk.compileShader(b, .{ .path = "src/shaders.hlsl" }, "shader.ps.cso", "PSMain", .ps_6_0, &.{}));
+
+    wsdk.embedShader(b, .{ .path = "src/shaders.hlsl" }, exe, "shader.vs.cso", "VSMain", .vs_6_0, &.{});
+    wsdk.embedShader(b, .{ .path = "src/shaders.hlsl" }, exe, "shader.ps.cso", "PSMain", .ps_6_0, &.{});
 
     b.installArtifact(exe);
 
@@ -142,6 +145,37 @@ const WinSdk = struct {
 
         var install = b.addInstallFileWithDir(output_file, .bin, output);
         return &install.step;
+    }
+
+    pub fn embedShader(
+        self: *const WinSdk,
+        b: *std.Build,
+        input: LazyPath,
+        target: *std.Build.CompileStep,
+        name: []const u8,
+        entry_point: []const u8,
+        profile: ShaderProfile,
+        defines: []const []const u8,
+    ) void {
+        var compile = b.addSystemCommand(&[_][]const u8{self.dxc});
+        compile.setName("dxc");
+        compile.addFileArg(input);
+        compile.addArg("/E");
+        compile.addArg(entry_point);
+        compile.addArg("/Fo");
+        const output_file = compile.addOutputFileArg(name);
+        compile.addArg("/T");
+        compile.addArg(@tagName(profile));
+        for (defines) |def| {
+            compile.addArg("/D");
+            compile.addArg(def);
+        }
+        compile.addArg("/WX");
+        compile.addArg("/Ges");
+        compile.addArg("/O3");
+
+        target.addAnonymousModule(name, .{ .source_file = output_file });
+        //target.step.dependOn(&compile.step);
     }
 
     pub const ShaderProfile = enum { vs_6_0, ps_6_0 };

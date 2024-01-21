@@ -765,43 +765,43 @@ pub const D3D12_LOGIC_OP_OR_REVERSE = D3D12_LOGIC_OP.OR_REVERSE;
 pub const D3D12_LOGIC_OP_OR_INVERTED = D3D12_LOGIC_OP.OR_INVERTED;
 
 pub const D3D12_RENDER_TARGET_BLEND_DESC = extern struct {
-    BlendEnable: BOOL,
-    LogicOpEnable: BOOL,
-    SrcBlend: D3D12_BLEND,
-    DestBlend: D3D12_BLEND,
-    BlendOp: D3D12_BLEND_OP,
-    SrcBlendAlpha: D3D12_BLEND,
-    DestBlendAlpha: D3D12_BLEND,
-    BlendOpAlpha: D3D12_BLEND_OP,
-    LogicOp: D3D12_LOGIC_OP,
-    RenderTargetWriteMask: u8,
+    BlendEnable: BOOL = 0,
+    LogicOpEnable: BOOL = 0,
+    SrcBlend: D3D12_BLEND = .ONE,
+    DestBlend: D3D12_BLEND = .ZERO,
+    BlendOp: D3D12_BLEND_OP = .ADD,
+    SrcBlendAlpha: D3D12_BLEND = .ONE,
+    DestBlendAlpha: D3D12_BLEND = .ZERO,
+    BlendOpAlpha: D3D12_BLEND_OP = .ADD,
+    LogicOp: D3D12_LOGIC_OP = .NOOP,
+    RenderTargetWriteMask: u8 = @intFromEnum(D3D12_COLOR_WRITE_ENABLE_ALL),
 };
 
 pub const D3D12_BLEND_DESC = extern struct {
-    AlphaToCoverageEnable: BOOL,
-    IndependentBlendEnable: BOOL,
-    RenderTarget: [8]D3D12_RENDER_TARGET_BLEND_DESC,
+    AlphaToCoverageEnable: BOOL = 0,
+    IndependentBlendEnable: BOOL = 0,
+    RenderTarget: [8]D3D12_RENDER_TARGET_BLEND_DESC = [1]D3D12_RENDER_TARGET_BLEND_DESC{.{}} ** 8,
 };
 
 pub const D3D12_CONSERVATIVE_RASTERIZATION_MODE = enum(i32) {
-    FF = 0,
-    N = 1,
+    OFF = 0,
+    ON = 1,
 };
 pub const D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF = D3D12_CONSERVATIVE_RASTERIZATION_MODE.FF;
 pub const D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON = D3D12_CONSERVATIVE_RASTERIZATION_MODE.N;
 
 pub const D3D12_RASTERIZER_DESC = extern struct {
-    FillMode: D3D12_FILL_MODE,
-    CullMode: D3D12_CULL_MODE,
-    FrontCounterClockwise: BOOL,
-    DepthBias: i32,
-    DepthBiasClamp: f32,
-    SlopeScaledDepthBias: f32,
-    DepthClipEnable: BOOL,
-    MultisampleEnable: BOOL,
-    AntialiasedLineEnable: BOOL,
-    ForcedSampleCount: u32,
-    ConservativeRaster: D3D12_CONSERVATIVE_RASTERIZATION_MODE,
+    FillMode: D3D12_FILL_MODE = .SOLID,
+    CullMode: D3D12_CULL_MODE = .BACK,
+    FrontCounterClockwise: BOOL = 0,
+    DepthBias: i32 = D3D12_DEFAULT_DEPTH_BIAS,
+    DepthBiasClamp: f32 = D3D12_DEFAULT_DEPTH_BIAS_CLAMP,
+    SlopeScaledDepthBias: f32 = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS,
+    DepthClipEnable: BOOL = 1,
+    MultisampleEnable: BOOL = 0,
+    AntialiasedLineEnable: BOOL = 0,
+    ForcedSampleCount: u32 = 0,
+    ConservativeRaster: D3D12_CONSERVATIVE_RASTERIZATION_MODE = .OFF,
 };
 
 // This COM type is Agile, not sure what that means
