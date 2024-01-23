@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    exe.subsystem = .Windows;
     //if (optimize == .ReleaseFast) exe.strip = true;
 
     // exe.addLibraryPath(.{ .path = b.bmt("{s}\\um\\x64", wsdk.lib) });
