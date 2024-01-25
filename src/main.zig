@@ -34,6 +34,10 @@ inline fn hrPanicOnFail(hr: wf.HRESULT) void {
     if (hr < 0) unreachable;
 }
 
+pub inline fn expectEqual(expected: anytype, actual: anytype) void {
+    std.testing.expectEqual(expected, actual) catch unreachable;
+}
+
 const App = struct {
     const frame_count = 2;
 
@@ -51,7 +55,6 @@ const App = struct {
     device: *dx12.ID3D12Device,
     command_queue: *dx12.ID3D12CommandQueue,
     swap_chain: *dxgi.IDXGISwapChain3,
-    // frame: u32,
     rtv_heap: *dx12.ID3D12DescriptorHeap,
     rtv_desc_size: u32,
     render_targets: [frame_count]*dx12.ID3D12Resource,
@@ -165,35 +168,37 @@ const App = struct {
         ));
         errdefer _ = command_queue.release();
 
-        const swap_chain_desc = dxgi.DXGI_SWAP_CHAIN_DESC1{
-            .Width = size[0],
-            .Height = size[1],
-            .Format = .R8G8B8A8_UNORM,
-            .Stereo = 0,
-            .SampleDesc = .{
-                .Count = 1,
-                .Quality = 0,
-            },
-            .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            .BufferCount = frame_count, // duble buffered
-            .Scaling = .STRETCH,
-            .SwapEffect = .FLIP_DISCARD,
-            .AlphaMode = .UNSPECIFIED,
-            .Flags = 0,
-        };
-        var swap_chain: *dxgi.IDXGISwapChain1 = undefined;
-        try hrErrorOnFail(factory.createSwapChainForHwnd(
-            @ptrCast(command_queue), // Swap chain needs the queue so that it can force a flush on it.
-            hwnd,
-            &swap_chain_desc,
-            null,
-            null,
-            @ptrCast(&swap_chain),
-        ));
-        errdefer _ = swap_chain.release();
-
         var swap_chain3: *dxgi.IDXGISwapChain3 = undefined;
-        try hrErrorOnFail(swap_chain.queryInterface(dxgi.IID_IDXGISwapChain3, @ptrCast(&swap_chain3)));
+        {
+            var swap_chain: *dxgi.IDXGISwapChain1 = undefined;
+            try hrErrorOnFail(factory.createSwapChainForHwnd(
+                @ptrCast(command_queue), // Swap chain needs the queue so that it can force a flush on it.
+                hwnd,
+                &dxgi.DXGI_SWAP_CHAIN_DESC1{
+                    .Width = size[0],
+                    .Height = size[1],
+                    .Format = .R8G8B8A8_UNORM,
+                    .Stereo = 0,
+                    .SampleDesc = .{
+                        .Count = 1,
+                        .Quality = 0,
+                    },
+                    .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                    .BufferCount = frame_count, // duble buffered
+                    .Scaling = .STRETCH,
+                    .SwapEffect = .FLIP_DISCARD,
+                    .AlphaMode = .UNSPECIFIED,
+                    .Flags = 0,
+                },
+                null,
+                null,
+                @ptrCast(&swap_chain),
+            ));
+            errdefer _ = swap_chain.release();
+
+            try hrErrorOnFail(swap_chain.queryInterface(dxgi.IID_IDXGISwapChain3, @ptrCast(&swap_chain3)));
+            _ = swap_chain.release();
+        }
 
         // this sample does not support fullscreen transitions.
         _ = factory.makeWindowAssociation(hwnd, dxgi.DXGI_MWA_NO_ALT_ENTER);
@@ -227,7 +232,7 @@ const App = struct {
         var rtv_handle = rtv_heap.getCPUDescriptorHandleForHeapStart();
         // create a RTV for each frame.
         for (0..frame_count) |n| {
-            try hrErrorOnFail(swap_chain.getBuffer(
+            try hrErrorOnFail(swap_chain3.getBuffer(
                 @intCast(n),
                 dx12.IID_ID3D12Resource,
                 @ptrCast(&render_targets[n]),
@@ -330,7 +335,6 @@ const App = struct {
             .device = device,
             .command_queue = command_queue,
             .swap_chain = swap_chain3,
-            // .frame = swap_chain3.getCurrentBackBufferIndex(),
             .rtv_heap = rtv_heap,
             .rtv_desc_size = rtv_desc_size,
             .render_targets = render_targets,
@@ -338,7 +342,7 @@ const App = struct {
             .command_list = command_list,
             .root_sig = root_sig,
 
-            .frame_index = 0,
+            .frame_index = swap_chain3.getCurrentBackBufferIndex(),
             .fence_event = fence_event,
             .fence = fence,
             .fence_value = fence_value,
