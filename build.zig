@@ -8,11 +8,11 @@ const FAILED = win.zig.FAILED;
 
 pub fn build(b: *std.Build) !void {
     // windows only
-    const target = std.zig.CrossTarget{
+    const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .windows,
         .abi = .msvc,
-    };
+    });
     const optimize = b.standardOptimizeOption(.{});
 
     const wsdk = try WinSdk.init(b);
@@ -152,7 +152,7 @@ const WinSdk = struct {
         self: *const WinSdk,
         b: *std.Build,
         input: LazyPath,
-        target: *std.Build.CompileStep,
+        target: *Step.Compile,
         name: []const u8,
         entry_point: []const u8,
         profile: ShaderProfile,
@@ -175,7 +175,7 @@ const WinSdk = struct {
         compile.addArg("/Ges");
         compile.addArg("/O3");
 
-        target.addAnonymousModule(name, .{ .source_file = output_file });
+        target.root_module.addAnonymousImport(name, .{ .root_source_file = output_file });
         //target.step.dependOn(&compile.step);
     }
 

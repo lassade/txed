@@ -51,7 +51,7 @@ const App = struct {
     device: *dx12.ID3D12Device,
     command_queue: *dx12.ID3D12CommandQueue,
     swap_chain: *dxgi.IDXGISwapChain3,
-    frame: u32,
+    // frame: u32,
     rtv_heap: *dx12.ID3D12DescriptorHeap,
     rtv_desc_size: u32,
     render_targets: [frame_count]*dx12.ID3D12Resource,
@@ -107,7 +107,7 @@ const App = struct {
                     @ptrCast(&adapter),
                 ))) : (adapterIndex += 1) {
                     var desc: dxgi.DXGI_ADAPTER_DESC1 = undefined;
-                    _ = adapter.getDesc1(&desc);
+                    try hrErrorOnFail(adapter.getDesc1(&desc));
 
                     // don't select the Basic Render Driver adapter
                     // if you want a software adapter, pass in "/warp" on the command line
@@ -330,7 +330,7 @@ const App = struct {
             .device = device,
             .command_queue = command_queue,
             .swap_chain = swap_chain3,
-            .frame = swap_chain3.getCurrentBackBufferIndex(),
+            // .frame = swap_chain3.getCurrentBackBufferIndex(),
             .rtv_heap = rtv_heap,
             .rtv_desc_size = rtv_desc_size,
             .render_targets = render_targets,
@@ -406,6 +406,7 @@ const App = struct {
                 .{ .pos = .{ 0.25, -0.25 * self.aspect_ratio, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
                 .{ .pos = .{ -0.25, -0.25 * self.aspect_ratio, 0.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
             };
+            const triangle_bytes = std.mem.sliceAsBytes(&triangle);
 
             // Note: using upload heaps to transfer static data like vert buffers is not
             // recommended. Every time the GPU needs it, the upload heap will be marshalled
@@ -421,7 +422,7 @@ const App = struct {
             const vertex_buffer_desc = dx12.D3D12_RESOURCE_DESC{
                 .Dimension = .BUFFER,
                 .Alignment = 0,
-                .Width = @intCast(triangle.len),
+                .Width = @intCast(triangle_bytes.len),
                 .Height = 1,
                 .DepthOrArraySize = 1,
                 .MipLevels = 1,
@@ -448,7 +449,6 @@ const App = struct {
             var vertex_data: [*]u8 = undefined;
             const read_range = dx12.D3D12_RANGE{ .Begin = 0, .End = 0 }; // we do not intend to read from this resource on the CPU.
             try hrErrorOnFail(self.vertex_buffer.map(0, &read_range, @ptrCast(&vertex_data)));
-            const triangle_bytes = std.mem.sliceAsBytes(&triangle);
             @memcpy(vertex_data, triangle_bytes);
             self.vertex_buffer.unmap(0, null);
 
