@@ -637,21 +637,21 @@ pub const D3D12_STENCIL_OP_INCR = D3D12_STENCIL_OP.INCR;
 pub const D3D12_STENCIL_OP_DECR = D3D12_STENCIL_OP.DECR;
 
 pub const D3D12_DEPTH_STENCILOP_DESC = extern struct {
-    StencilFailOp: D3D12_STENCIL_OP,
-    StencilDepthFailOp: D3D12_STENCIL_OP,
-    StencilPassOp: D3D12_STENCIL_OP,
-    StencilFunc: D3D12_COMPARISON_FUNC,
+    StencilFailOp: D3D12_STENCIL_OP = .KEEP,
+    StencilDepthFailOp: D3D12_STENCIL_OP = .KEEP,
+    StencilPassOp: D3D12_STENCIL_OP = .KEEP,
+    StencilFunc: D3D12_COMPARISON_FUNC = .ALWAYS,
 };
 
 pub const D3D12_DEPTH_STENCIL_DESC = extern struct {
-    DepthEnable: BOOL,
-    DepthWriteMask: D3D12_DEPTH_WRITE_MASK,
-    DepthFunc: D3D12_COMPARISON_FUNC,
-    StencilEnable: BOOL,
-    StencilReadMask: u8,
-    StencilWriteMask: u8,
-    FrontFace: D3D12_DEPTH_STENCILOP_DESC,
-    BackFace: D3D12_DEPTH_STENCILOP_DESC,
+    DepthEnable: BOOL = 0,
+    DepthWriteMask: D3D12_DEPTH_WRITE_MASK = .ZERO,
+    DepthFunc: D3D12_COMPARISON_FUNC = .LESS_EQUAL,
+    StencilEnable: BOOL = 0,
+    StencilReadMask: u8 = 0,
+    StencilWriteMask: u8 = 0,
+    FrontFace: D3D12_DEPTH_STENCILOP_DESC = .{},
+    BackFace: D3D12_DEPTH_STENCILOP_DESC = .{},
 };
 
 pub const D3D12_DEPTH_STENCIL_DESC1 = extern struct {
@@ -896,16 +896,16 @@ pub const ID3D12RootSignature = extern struct {
 };
 
 pub const D3D12_SHADER_BYTECODE = extern struct {
-    pShaderBytecode: ?*const anyopaque,
-    BytecodeLength: usize,
+    pShaderBytecode: ?*const anyopaque = null,
+    BytecodeLength: usize = 0,
 };
 
 pub const D3D12_STREAM_OUTPUT_DESC = extern struct {
-    pSODeclaration: ?*const D3D12_SO_DECLARATION_ENTRY,
-    NumEntries: u32,
-    pBufferStrides: ?*const u32,
-    NumStrides: u32,
-    RasterizedStream: u32,
+    pSODeclaration: ?*const D3D12_SO_DECLARATION_ENTRY = null,
+    NumEntries: u32 = 0,
+    pBufferStrides: ?*const u32 = null,
+    NumStrides: u32 = 0,
+    RasterizedStream: u32 = 0,
 };
 
 pub const D3D12_INPUT_LAYOUT_DESC = extern struct {
@@ -923,8 +923,8 @@ pub const D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF = D3D12_INDEX_BUFFER_STRIP_C
 pub const D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE.@"0xFFFFFFFF";
 
 pub const D3D12_CACHED_PIPELINE_STATE = extern struct {
-    pCachedBlob: ?*const anyopaque,
-    CachedBlobSizeInBytes: usize,
+    pCachedBlob: ?*const anyopaque = null,
+    CachedBlobSizeInBytes: usize = 0,
 };
 
 pub const D3D12_PIPELINE_STATE_FLAGS = enum(u32) {

@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) !void {
     });
     const optimize = b.standardOptimizeOption(.{});
 
+    b.exe_dir = b.pathJoin(&.{ "zig-out", @tagName(optimize) });
+
     const wsdk = try WinSdk.init(b);
 
     const exe = b.addExecutable(.{
@@ -23,11 +25,13 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    exe.subsystem = .Windows;
+    // exe.subsystem = .Windows;
+    exe.linkLibC();
     //if (optimize == .ReleaseFast) exe.strip = true;
 
+    exe.addCSourceFile(.{ .file = .{ .path = "src/stb/stb.c" }, .flags = &.{"-O3"} });
+
     // exe.addLibraryPath(.{ .path = b.bmt("{s}\\um\\x64", wsdk.lib) });
-    // exe.linkLibC();
     // exe.linkSystemLibrary("d3d12");
     // exe.linkSystemLibrary("dxgi");
     // exe.linkSystemLibrary("d3dcompiler");
@@ -144,6 +148,8 @@ const WinSdk = struct {
         compile.addArg("/Ges");
         compile.addArg("/O3");
 
+        // todo: on debug builds skip optimizations and compile debug
+
         var install = b.addInstallFileWithDir(output_file, .bin, output);
         return &install.step;
     }
@@ -174,6 +180,8 @@ const WinSdk = struct {
         compile.addArg("/WX");
         compile.addArg("/Ges");
         compile.addArg("/O3");
+
+        // todo: on debug builds skip optimizations and compile debug
 
         target.root_module.addAnonymousImport(name, .{ .root_source_file = output_file });
         //target.step.dependOn(&compile.step);
