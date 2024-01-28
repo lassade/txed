@@ -8,11 +8,12 @@ cbuffer Config : register(b0) {
     uint2 slot_size;
     uint2 font_atlas_size;
     uint2 console_size;
+    uint2 screen_size;
     float4 bg_color;
 };
 StructuredBuffer<Char> console: register(t0);
 Texture2D<float> font_atlas : register(t1);
-RWTexture2D<float4> output : register(u0);
+RWTexture2D<float4> screen : register(u0);
 
 [numthreads(16, 16, 1)]
 void csMain(uint3 id : SV_DispatchThreadID) {
@@ -41,8 +42,13 @@ void csMain(uint3 id : SV_DispatchThreadID) {
 
     for (uint x = 0; x < slot_size.x; x++) {
         for (uint y = 0; y < slot_size.y; y++) {
-            float alpha = font_atlas[uint2(slot_size.x * font_x + x, slot_size.y * font_y + y)];
-            output[uint2(slot_size.x * id.x + x, slot_size.y * id.y + y)] = lerp(bg_color, fg_color, alpha);
+            uint2 p1 = uint2(slot_size.x * id.x + x, slot_size.y * id.y + y);
+            if (p1.x >= screen_size.x) continue;
+            if (p1.y >= screen_size.y) continue;
+
+            uint2 p0 = uint2(slot_size.x * font_x + x, slot_size.y * font_y + y);
+            float alpha = font_atlas[p0];
+            screen[p1] = lerp(bg_color, fg_color, alpha);
         }
     }
 }

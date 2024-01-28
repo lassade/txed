@@ -83,7 +83,14 @@ const App = struct {
         slot_size: [2]u32,
         font_atlas_size: [2]u32,
         console_size: [2]u32,
+        screen_size: [2]u32,
         bg_color: [4]f32,
+    };
+
+    const ChangedFlags = packed struct(u32) {
+        console: bool = false,
+        file_view: bool = false,
+        unused: u30 = 0,
     };
 
     allocator: Allocator,
@@ -94,6 +101,8 @@ const App = struct {
     aspect_ratio: f32,
     viewport: dx12.D3D12_VIEWPORT,
     scissor_rect: wf.RECT,
+
+    changed: ChangedFlags = .{},
 
     device: *dx12.ID3D12Device,
     command_queue: *dx12.ID3D12CommandQueue,
@@ -130,14 +139,14 @@ const App = struct {
     config_buffer: GPUBuffer,
 
     console: []Char,
-    console_dirty: bool,
     console_buffer: GPUBuffer,
     console_size: [2]u32,
 
     console_output: *dx12.ID3D12Resource,
     console_output_desc_offset: u64,
 
-    files: std.ArrayListUnmanaged(TextFile),
+    files: std.ArrayListUnmanaged(TextFile) = .{},
+    file_index: u32 = 0xffffffff,
 
     fn init(allocator: Allocator, hwnd: wf.HWND, size: [2]u32) !App {
         var dxgi_factory_flags: u32 = 0;
@@ -466,14 +475,11 @@ const App = struct {
             .config_buffer = undefined,
 
             .console = undefined,
-            .console_dirty = false,
             .console_buffer = undefined,
             .console_size = undefined,
 
             .console_output = undefined,
             .console_output_desc_offset = undefined,
-
-            .files = .{},
         };
 
         self.srv_heap = try GPUDescHeap.init(device, .CBV_SRV_UAV, 16, .SHADER_VISIBLE);
@@ -500,8 +506,8 @@ const App = struct {
         self.font = try Font.initSystemFont(allocator, hwnd, "Consolas");
         errdefer self.font.deinit(allocator);
 
-        self.font_size = 18.0;
-        self.font_atlas_size = .{ 1024, 512 };
+        self.font_size = 16.0;
+        self.font_atlas_size = .{ 256, 128 };
 
         const font_format = dxgi.common.DXGI_FORMAT.R8_UNORM;
         const font_stride = self.font_atlas_size[0];
@@ -513,7 +519,7 @@ const App = struct {
         const h_metrics = self.font.info.getHMetrics(default_codepoint);
         const ascent: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(v_metrics.ascent)) * self.font_scale) + 1.0); // account for rounding error
         self.slot_size[0] = @intFromFloat(@ceil(@as(f32, @floatFromInt(h_metrics.advance_width)) * self.font_scale));
-        self.slot_size[1] = @intFromFloat(@ceil(@as(f32, @floatFromInt(v_metrics.ascent - v_metrics.descent)) * self.font_scale));
+        self.slot_size[1] = @intFromFloat(@ceil(@as(f32, @floatFromInt(v_metrics.ascent - v_metrics.descent)) * self.font_scale) + 1.0);
         self.font_atlas_slot_pos = .{ 1, 0 };
         self.font_atlas_slot_count_per_dim[0] = self.font_atlas_size[0] / self.slot_size[0];
         self.font_atlas_slot_count_per_dim[1] = self.font_atlas_size[1] / self.slot_size[1];
@@ -522,7 +528,7 @@ const App = struct {
 
         // update console
         // todo: free previous console on resize
-        self.console_size = .{ self.screen_size[0] / self.slot_size[0], self.screen_size[1] / self.slot_size[1] };
+        self.console_size = .{ self.screen_size[0] / self.slot_size[0] + 1, self.screen_size[1] / self.slot_size[1] + 1 };
         self.console = try allocator.alloc(Char, self.console_size[0] * self.console_size[1]);
         const console_byte_len: u32 = @intCast(@sizeOf(Char) * self.console.len);
         // todo: console buffer only grows
@@ -558,7 +564,8 @@ const App = struct {
                 .slot_size = self.slot_size,
                 .font_atlas_size = self.font_atlas_slot_count_per_dim,
                 .console_size = self.console_size,
-                .bg_color = .{ 0.0, 0.0, 0.0, 0.0 },
+                .screen_size = self.screen_size,
+                .bg_color = .{ 39.0 / 255.0, 40.0 / 255.0, 34.0 / 255.0, 1.0 },
             }));
             self.command_list.copyBufferRegion(
                 self.config_buffer.heap,
@@ -751,7 +758,8 @@ const App = struct {
         if (builtin.mode == .Debug) {
             if (TextFile.open(allocator, "src/main.zig")) |file| {
                 try self.files.append(allocator, file);
-                self.viewFile(0);
+                self.file_index = 0;
+                self.changed.file_view = true;
             } else |_| {
                 // do nothing
             }
@@ -818,27 +826,33 @@ const App = struct {
 
     fn clearConsole(self: *App) void {
         @memset(self.console, Char{ .index = 0, .color = 0xffffffff });
-        self.console_dirty = true;
+        self.changed.console = true;
     }
 
-    fn viewFile(self: *App, file_index: usize) void {
+    fn viewFile(self: *App, file_index: u32) void {
         if (self.files.items.len <= file_index) {
             self.clearConsole();
             return;
         }
 
         const file = &self.files.items[file_index];
+        self.file_index = file_index;
 
         var i: usize = 0;
         for (0..self.console_size[1]) |y| {
             for (0..self.console_size[0]) |x| {
                 var char = Char{ .index = 0, .color = 0xffffffff };
 
-                if (y < file.lines.len) {
-                    const line = file.lines.items(.data)[y];
-                    if (x < line.items.len) {
+                const pos = [2]usize{
+                    x + file.scroll_pos[0],
+                    y + file.scroll_pos[1],
+                };
+
+                if (pos[1] < file.lines.len) {
+                    const line = file.lines.items(.data)[pos[1]];
+                    if (pos[0] < line.items.len) {
                         // todo: read unicode char
-                        const unicode: u32 = line.items[x];
+                        const unicode: u32 = line.items[pos[0]];
                         if (std.mem.indexOfScalar(u32, self.unicode_map.items, unicode)) |index| {
                             char.index = @intCast(index);
                         }
@@ -850,16 +864,26 @@ const App = struct {
             }
         }
 
-        self.console_dirty = true;
+        self.changed.file_view = false;
+        self.changed.console = true;
     }
 
     fn tick(self: *App) !void {
+        if (@as(u32, @bitCast(self.changed)) == 0) {
+            return;
+        }
+
         try hrErrorOnFail(self.command_allocator.reset());
         try hrErrorOnFail(self.command_list.reset(self.command_allocator, self.pipeline_state));
 
         const staging_buffer = &self.staging_buffers[self.frame_index];
 
-        if (self.console_dirty) {
+        if (self.changed.file_view) {
+            self.viewFile(self.file_index);
+            self.changed.file_view = false;
+        }
+
+        if (self.changed.console) {
             const console_bytes = std.mem.sliceAsBytes(self.console);
             const result = try staging_buffer.alloc(console_bytes.len);
             @memcpy(result.cpu_slice, console_bytes);
@@ -870,7 +894,7 @@ const App = struct {
                 result.offset,
                 @intCast(console_bytes.len),
             );
-            self.console_dirty = false;
+            self.changed.console = false;
         }
 
         self.command_list.setComputeRootSignature(self.root_sig);
@@ -960,11 +984,14 @@ const App = struct {
 
         try hrErrorOnFail(self.command_list.close());
 
-        // execute the command list.
+        // execute the command list
         const command_lists = [_]*dx12.ID3D12GraphicsCommandList{self.command_list};
         self.command_queue.executeCommandLists(@intCast(command_lists.len), @constCast(@ptrCast(&command_lists)));
 
-        // Present the frame.
+        // clear current staging buffer to be used in the next couple of frames
+        staging_buffer.len = 0;
+
+        // present the frame
         try hrErrorOnFail(self.swap_chain.present(1, 0));
 
         try self.waitForPreviousFrame();
@@ -1001,6 +1028,28 @@ const App = struct {
         _ = self;
         log.info("up: {s}", .{@tagName(key)});
     }
+
+    fn scroll(self: *App, offset: [2]i32) void {
+        if (self.file_index >= self.files.items.len) return;
+        var file = &self.files.items[self.file_index];
+
+        // todo: per-pixel scroll and soft scroll
+
+        // const o: [2]u32 = file.scroll_pos;
+
+        inline for (0..2) |i| {
+            if (offset[i] >= 0) {
+                file.scroll_pos[i] +|= @bitCast(offset[i]);
+            } else {
+                file.scroll_pos[i] -|= @bitCast(-offset[i]);
+            }
+        }
+
+        // todo: this doesn't work, why?
+        // if (file.scroll_pos[0] == o[0] and file.scroll_pos[1] == o[1]) return;
+
+        self.changed.file_view = true;
+    }
 };
 
 const TextFile = struct {
@@ -1008,8 +1057,7 @@ const TextFile = struct {
     size: u64,
     lines: std.MultiArrayList(Line),
     cursors: std.ArrayListUnmanaged(Cursor),
-
-    // scroll_pos: ...
+    scroll_pos: [2]u32,
 
     pub const Line = struct {
         data: std.ArrayListUnmanaged(u8),
@@ -1045,6 +1093,7 @@ const TextFile = struct {
             .size = size,
             .lines = .{},
             .cursors = .{},
+            .scroll_pos = .{ 0, 0 },
         };
 
         try self.readFile(allocator);
@@ -1122,10 +1171,11 @@ fn windowProc(
         // // all painting occurs here, between BeginPaint and EndPaint.
         // _ = gdi.FillRect(hdc, &ps.rcPaint, @as(gdi.HBRUSH, @ptrFromInt(@intFromEnum(wm.COLOR_WINDOWFRAME))));
         // _ = gdi.EndPaint(hwnd, &ps);
-        app.?.tick() catch {
-            // todo: better error handling
-            _ = wm.DestroyWindow(hwnd);
-        };
+        app.?.tick() catch unreachable;
+        // {
+        //     // todo: better error handling
+        //     _ = wm.DestroyWindow(hwnd);
+        // };
         return 0;
     } else if (umsg == wm.WM_KEYDOWN) {
         app.?.keyDown(@enumFromInt(wparam));
@@ -1134,8 +1184,13 @@ fn windowProc(
         app.?.keyUp(@enumFromInt(wparam));
         return 0;
     } else if (umsg == wm.WM_MOUSEMOVE) {
+        // const x: i16 = @truncate((lparam) & 0xffff);
+        // const y: i16 = @truncate((lparam >> 16) & 0xffff);
         return 0;
     } else if (umsg == wm.WM_MOUSEWHEEL) {
+        var y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((wparam >> 16) & 0xffff)))));
+        y = @divTrunc(y, 120);
+        app.?.scroll(.{ 0, -y });
         return 0;
     } else if (umsg == wm.WM_MOUSEACTIVATE) {
         return 0;
