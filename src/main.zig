@@ -77,8 +77,26 @@ const App = struct {
         uv: [2]f32,
     };
 
+    const Char = extern struct {
+        index: u32,
+        color: u32,
+    };
+
+    const Cursor = struct {
+        pos: [2]u32,
+        x: u32,
+    };
+
+    const Config = extern struct {
+        slot_size: [2]u32,
+        font_atlas_size: [2]u32,
+        console_size: [2]u32,
+        bg_color: [4]f32,
+    };
+
     hwnd: wf.HWND,
 
+    screen_size: [2]u32,
     aspect_ratio: f32,
     viewport: dx12.D3D12_VIEWPORT,
     scissor_rect: wf.RECT,
@@ -92,7 +110,6 @@ const App = struct {
     render_targets: [frame_count]*dx12.ID3D12Resource,
     command_allocator: *dx12.ID3D12CommandAllocator,
     command_list: *dx12.ID3D12GraphicsCommandList,
-    root_sig: *dx12.ID3D12RootSignature,
 
     frame_index: u32,
     fence_event: wf.HANDLE,
@@ -100,10 +117,9 @@ const App = struct {
     fence_value: u64,
 
     staging_buffers: [frame_count]GPUStagingBuffer,
-    vb: GPUBuffer,
 
+    root_sig: *dx12.ID3D12RootSignature,
     pipeline_state: *dx12.ID3D12PipelineState,
-    mesh_vbv: dx12.D3D12_VERTEX_BUFFER_VIEW,
 
     font: Font,
     font_size: f32,
@@ -115,6 +131,13 @@ const App = struct {
     font_atlas_slot_count_per_dim: [2]u32,
     font_atlas_slot_count: u32,
     unicode_map: std.ArrayListUnmanaged(u32),
+
+    config_buffer: GPUBuffer,
+
+    console: []Char,
+    console_buffer: GPUBuffer,
+    console_size: [2]u32,
+    // cursors: std.ArrayList(Cursor),
 
     fn init(hwnd: wf.HWND, size: [2]u32) !App {
         var dxgi_factory_flags: u32 = 0;
@@ -309,38 +332,11 @@ const App = struct {
         // create an empty root signature.
         var root_sig: *dx12.ID3D12RootSignature = undefined;
         {
-            const sampler = dx12.D3D12_STATIC_SAMPLER_DESC{
-                .Filter = .MIN_MAG_MIP_POINT,
-                .AddressU = .BORDER,
-                .AddressV = .BORDER,
-                .AddressW = .BORDER,
-                .MipLODBias = 0.0,
-                .MaxAnisotropy = 0,
-                .ComparisonFunc = .NEVER,
-                .BorderColor = .TRANSPARENT_BLACK,
-                .MinLOD = 0.0,
-                .MaxLOD = std.math.floatMax(f32),
-                .ShaderRegister = 0,
-                .RegisterSpace = 0,
-                .ShaderVisibility = .PIXEL,
-            };
-
-            const param = dx12.D3D12_ROOT_PARAMETER{
-                .ParameterType = .DESCRIPTOR_TABLE,
-                .Anonymous = .{
-                    .DescriptorTable = dx12.D3D12_ROOT_DESCRIPTOR_TABLE{
-                        .NumDescriptorRanges = 1,
-                        .pDescriptorRanges = @ptrCast(&dx12.D3D12_DESCRIPTOR_RANGE{
-                            .RangeType = .SRV,
-                            .NumDescriptors = 1,
-                            .BaseShaderRegister = 0,
-                            .RegisterSpace = 0,
-                            // .Flags = .DATA_STATIC,
-                            .OffsetInDescriptorsFromTableStart = 0xffffffff,
-                        }),
-                    },
-                },
-                .ShaderVisibility = .PIXEL,
+            const params = [_]dx12.D3D12_ROOT_PARAMETER{
+                dx12.D3D12_ROOT_PARAMETER.initDescriptorTable(&.{dx12.D3D12_DESCRIPTOR_RANGE.init(.CBV, 1, 0)}, .ALL),
+                dx12.D3D12_ROOT_PARAMETER.initDescriptorTable(&.{dx12.D3D12_DESCRIPTOR_RANGE.init(.SRV, 1, 0)}, .ALL),
+                dx12.D3D12_ROOT_PARAMETER.initDescriptorTable(&.{dx12.D3D12_DESCRIPTOR_RANGE.init(.SRV, 1, 1)}, .ALL),
+                dx12.D3D12_ROOT_PARAMETER.initDescriptorTable(&.{dx12.D3D12_DESCRIPTOR_RANGE.init(.UAV, 1, 0)}, .ALL),
             };
 
             var signature: *dx.ID3DBlob = undefined;
@@ -348,10 +344,10 @@ const App = struct {
             errdefer _ = err.release(); // otherwise err is null
             try hrErrorOnFail(dx12.D3D12SerializeRootSignature(
                 &dx12.D3D12_ROOT_SIGNATURE_DESC{
-                    .NumParameters = 1,
-                    .pParameters = @ptrCast(&param),
-                    .NumStaticSamplers = 1,
-                    .pStaticSamplers = @ptrCast(&sampler),
+                    .NumParameters = @intCast(params.len),
+                    .pParameters = @ptrCast(&params),
+                    .NumStaticSamplers = 0,
+                    .pStaticSamplers = null,
                     .Flags = .ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
                 },
                 .v1_0,
@@ -368,6 +364,24 @@ const App = struct {
             ));
         }
         errdefer _ = root_sig.release();
+
+        // load shaders
+        var pipeline_state: *dx12.ID3D12PipelineState = undefined;
+        {
+            const cs_cso = @embedFile("console.cs.cso");
+            try hrErrorOnFail(device.createComputePipelineState(
+                &dx12.D3D12_COMPUTE_PIPELINE_STATE_DESC{
+                    .pRootSignature = root_sig,
+                    .CS = .{ .pShaderBytecode = cs_cso, .BytecodeLength = cs_cso.len },
+                    .NodeMask = 0,
+                    .CachedPSO = .{},
+                    .Flags = .NONE,
+                },
+                dx12.IID_ID3D12PipelineState,
+                @ptrCast(&pipeline_state),
+            ));
+        }
+        errdefer _ = pipeline_state.release();
 
         // create the command list.
         var command_list: *dx12.ID3D12GraphicsCommandList = undefined;
@@ -403,22 +417,21 @@ const App = struct {
             }
         }
         for (0..frame_count) |i| {
-            staging_buffers[i] = try GPUStagingBuffer.init(device, 4 * 1024 * 1024);
+            staging_buffers[i] = try GPUStagingBuffer.init(device, 64 * 1024);
             staging_buffers_len += 1;
         }
 
-        // create buffers
-        var vb = try GPUBuffer.init(
+        const config_buffer = try GPUBuffer.init(
             device,
-            256,
+            std.mem.alignForward(u64, @sizeOf(Config), 256),
             .DEFAULT,
             .COPY_DEST,
         );
-        errdefer vb.deinit();
 
         var self = App{
             .hwnd = hwnd,
 
+            .screen_size = size,
             .aspect_ratio = @as(f32, @floatFromInt(size[0])) / @as(f32, @floatFromInt(size[1])),
             .viewport = .{
                 .TopLeftX = 0.0,
@@ -444,7 +457,6 @@ const App = struct {
             .render_targets = render_targets,
             .command_allocator = command_allocator,
             .command_list = command_list,
-            .root_sig = root_sig,
 
             .frame_index = swap_chain3.getCurrentBackBufferIndex(),
             .fence_event = fence_event,
@@ -452,10 +464,9 @@ const App = struct {
             .fence_value = fence_value,
 
             .staging_buffers = staging_buffers,
-            .vb = vb,
 
-            .pipeline_state = undefined,
-            .mesh_vbv = undefined,
+            .root_sig = root_sig,
+            .pipeline_state = pipeline_state,
 
             .font = undefined,
             .font_size = undefined,
@@ -467,88 +478,15 @@ const App = struct {
             .font_atlas_slot_count_per_dim = undefined,
             .font_atlas_slot_count = undefined,
             .unicode_map = .{},
+
+            .config_buffer = config_buffer,
+
+            .console = undefined,
+            .console_buffer = undefined,
+            .console_size = undefined,
         };
 
-        // load shaders
-        {
-            const vs_cso = @embedFile("shader.vs.cso");
-            const ps_cso = @embedFile("shader.ps.cso");
-
-            var pso_desc = std.mem.zeroes(dx12.D3D12_GRAPHICS_PIPELINE_STATE_DESC);
-            // define the vertex input layout.
-            const inputElementDescs = [_]dx12.D3D12_INPUT_ELEMENT_DESC{
-                .{
-                    .SemanticName = "POSITION",
-                    .SemanticIndex = 0,
-                    .Format = .R32G32B32_FLOAT,
-                    .InputSlot = 0,
-                    .AlignedByteOffset = @offsetOf(Vert, "pos"),
-                    .InputSlotClass = .VERTEX_DATA,
-                    .InstanceDataStepRate = 0,
-                },
-                .{
-                    .SemanticName = "TEXCOORD",
-                    .SemanticIndex = 0,
-                    .Format = .R32G32_FLOAT,
-                    .InputSlot = 0,
-                    .AlignedByteOffset = @offsetOf(Vert, "uv"),
-                    .InputSlotClass = .VERTEX_DATA,
-                    .InstanceDataStepRate = 0,
-                },
-            };
-            // describe and create the graphics pipeline state object (PSO).
-            pso_desc.InputLayout.NumElements = @intCast(inputElementDescs.len);
-            pso_desc.InputLayout.pInputElementDescs = @constCast(@ptrCast(&inputElementDescs));
-            pso_desc.pRootSignature = self.root_sig;
-            pso_desc.VS = .{ .pShaderBytecode = vs_cso, .BytecodeLength = vs_cso.len };
-            pso_desc.PS = .{ .pShaderBytecode = ps_cso, .BytecodeLength = ps_cso.len };
-            pso_desc.RasterizerState = .{};
-            pso_desc.BlendState = .{};
-            pso_desc.DepthStencilState.DepthEnable = wz.FALSE;
-            pso_desc.DepthStencilState.StencilEnable = wz.FALSE;
-            pso_desc.SampleMask = std.math.maxInt(u32);
-            pso_desc.PrimitiveTopologyType = .TRIANGLE;
-            pso_desc.NumRenderTargets = 1;
-            pso_desc.RTVFormats[0] = .R8G8B8A8_UNORM;
-            pso_desc.SampleDesc.Count = 1;
-            try hrErrorOnFail(self.device.createGraphicsPipelineState(
-                &pso_desc,
-                dx12.IID_ID3D12PipelineState,
-                @ptrCast(&self.pipeline_state),
-            ));
-        }
-        errdefer _ = self.pipeline_state.release();
-
         const staging_buffer = &self.staging_buffers[self.frame_index];
-
-        // create buffers
-        {
-            // define the geometry for a triangle.
-            const triangle = [_]Vert{
-                .{ .pos = .{ -1.0, 1.0, 0.0 }, .uv = .{ 0.0, 0.0 } },
-                .{ .pos = .{ 3.0, 1.0, 0.0 }, .uv = .{ 2.0, 0.0 } },
-                .{ .pos = .{ -1.0, -3.0, 0.0 }, .uv = .{ 0.0, 2.0 } },
-            };
-            const triangle_bytes = std.mem.sliceAsBytes(&triangle);
-
-            // copy the triangle data to the vertex buffer.
-            const result = try staging_buffer.alloc(@intCast(triangle_bytes.len));
-            @memcpy(result.cpu_slice, triangle_bytes);
-            self.command_list.copyBufferRegion(
-                self.vb.heap,
-                0,
-                staging_buffer.buffer.heap,
-                result.offset,
-                @intCast(triangle_bytes.len),
-            );
-
-            // initialize the vertex buffer view
-            self.mesh_vbv = dx12.D3D12_VERTEX_BUFFER_VIEW{
-                .BufferLocation = staging_buffer.buffer.heap.getGPUVirtualAddress() + result.offset,
-                .StrideInBytes = @sizeOf(Vert),
-                .SizeInBytes = @intCast(triangle_bytes.len),
-            };
-        }
 
         // load font
         self.font = try Font.initSystemFont(hwnd, "Consolas");
@@ -574,7 +512,58 @@ const App = struct {
         self.font_atlas_slot_count_per_dim[1] = self.font_atlas_size[1] / self.slot_size[1];
         self.font_atlas_slot_count = self.font_atlas_slot_count_per_dim[0] * self.font_atlas_slot_count_per_dim[1];
 
-        //self.font.info.getFontVMetrics()
+        // update console
+        self.console_size = .{ self.screen_size[0] / self.slot_size[0], self.screen_size[1] / self.slot_size[1] };
+        self.console = try std.heap.page_allocator.alloc(Char, self.console_size[0] * self.console_size[1]);
+        self.console_buffer = try GPUBuffer.init(
+            self.device,
+            @intCast(@sizeOf(Char) * self.console.len),
+            .DEFAULT,
+            .COPY_DEST,
+        );
+        errdefer std.heap.page_allocator.free(self.console);
+        errdefer self.console_buffer.deinit();
+
+        // update config buffer
+        {
+            const result = try staging_buffer.alloc(@sizeOf(Config));
+            @memcpy(result.cpu_slice, std.mem.asBytes(&Config{
+                .slot_size = self.slot_size,
+                .font_atlas_size = self.font_atlas_slot_count_per_dim,
+                .console_size = self.console_size,
+                .bg_color = .{ 0.0, 0.0, 0.0, 0.0 },
+            }));
+            self.command_list.copyBufferRegion(
+                self.config_buffer.heap,
+                0,
+                staging_buffer.buffer.heap,
+                result.offset,
+                @sizeOf(Config),
+            );
+        }
+
+        // insert random data on the console
+        {
+            var x128 = std.rand.Xoroshiro128.init(47);
+            var rng = x128.random();
+            for (0..self.console.len) |i| {
+                self.console[i] = .{
+                    .index = rng.intRangeLessThan(u32, 0, 128),
+                    .color = 0xffffffff,
+                };
+            }
+
+            const console_bytes = std.mem.sliceAsBytes(self.console);
+            const result = try staging_buffer.alloc(console_bytes.len);
+            @memcpy(result.cpu_slice, console_bytes);
+            self.command_list.copyBufferRegion(
+                self.console_buffer.heap,
+                0,
+                staging_buffer.buffer.heap,
+                result.offset,
+                @intCast(console_bytes.len),
+            );
+        }
 
         // pre cache font_strip characteres
         const strip_height = (128 / self.font_atlas_slot_count_per_dim[0] + 1) * self.slot_size[1];
@@ -738,13 +727,18 @@ const App = struct {
     fn deinit(self: *App) void {
         self.waitForPreviousFrame() catch {};
 
+        std.heap.page_allocator.free(self.console);
+        self.console_buffer.deinit();
+
         self.unicode_map.deinit(std.heap.page_allocator);
         _ = self.font_atlas.release();
         self.font.deinit();
 
         _ = self.pipeline_state.release();
+        _ = self.root_sig.release();
 
-        self.vb.deinit();
+        self.config_buffer.deinit();
+
         for (0..frame_count) |i| {
             self.staging_buffers[i].deinit();
         }
@@ -754,8 +748,6 @@ const App = struct {
 
         _ = self.command_allocator.release();
         _ = self.command_list.release();
-
-        _ = self.root_sig.release();
 
         for (0..frame_count) |i| {
             _ = self.render_targets[i].release();
@@ -774,8 +766,11 @@ const App = struct {
 
         // set necessary state.
         self.command_list.setGraphicsRootSignature(self.root_sig);
-        self.command_list.setDescriptorHeaps(1, @ptrCast(&self.srv_heap));
-        self.command_list.setGraphicsRootDescriptorTable(0, self.srv_heap.getGPUDescriptorHandleForHeapStart());
+        // self.command_list.setDescriptorHeaps(1, @ptrCast(&self.srv_heap));
+        // self.command_list.setGraphicsRootDescriptorTable(0, );
+        // self.command_list.setGraphicsRootDescriptorTable(1, self.srv_heap.getGPUDescriptorHandleForHeapStart());
+        // self.command_list.setGraphicsRootDescriptorTable(2, self.srv_heap.getGPUDescriptorHandleForHeapStart());
+        // self.command_list.setGraphicsRootDescriptorTable(3, self.srv_heap.getGPUDescriptorHandleForHeapStart());
         self.command_list.rsSetViewports(1, @ptrCast(&self.viewport));
         self.command_list.rsSetScissorRects(1, @ptrCast(&self.scissor_rect));
 
@@ -801,9 +796,8 @@ const App = struct {
         // record commands.
         const clearColor = [4]f32{ 0.0, 0.2, 0.4, 1.0 };
         self.command_list.clearRenderTargetView(rtv_handle, @ptrCast(&clearColor), 0, null);
-        self.command_list.iaSetPrimitiveTopology(.PT_TRIANGLELIST);
-        self.command_list.iaSetVertexBuffers(0, 1, @ptrCast(&self.mesh_vbv));
-        self.command_list.drawInstanced(3, 1, 0, 0);
+
+        // self.command_list.dispatch((self.console_size[0] / 16) + 1, (self.console_size[1] / 16) + 1, 1);
 
         // indicate that the back buffer will now be used to present.
         self.command_list.resourceBarrier(

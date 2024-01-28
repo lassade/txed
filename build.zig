@@ -40,8 +40,7 @@ pub fn build(b: *std.Build) !void {
     // dxc_step.dependOn(wsdk.compileShader(b, .{ .path = "src/shaders.hlsl" }, "shader.vs.cso", "VSMain", .vs_6_0, &.{}));
     // dxc_step.dependOn(wsdk.compileShader(b, .{ .path = "src/shaders.hlsl" }, "shader.ps.cso", "PSMain", .ps_6_0, &.{}));
 
-    wsdk.embedShader(b, .{ .path = "src/shaders.hlsl" }, exe, "shader.vs.cso", "VSMain", .vs_6_0, &.{});
-    wsdk.embedShader(b, .{ .path = "src/shaders.hlsl" }, exe, "shader.ps.cso", "PSMain", .ps_6_0, &.{});
+    wsdk.embedShader(b, .{ .path = "src/console.hlsl" }, exe, "console.cs.cso", "csMain", .cs_6_0, &.{});
 
     b.installArtifact(exe);
 
@@ -187,5 +186,5 @@ const WinSdk = struct {
         //target.step.dependOn(&compile.step);
     }
 
-    pub const ShaderProfile = enum { vs_6_0, ps_6_0 };
+    pub const ShaderProfile = enum { vs_6_0, ps_6_0, cs_6_0 };
 };

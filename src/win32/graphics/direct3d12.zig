@@ -2804,10 +2804,18 @@ pub const D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER = D3D12_DESCRIPTOR_RANGE_TYPE.SAMP
 
 pub const D3D12_DESCRIPTOR_RANGE = extern struct {
     RangeType: D3D12_DESCRIPTOR_RANGE_TYPE,
-    NumDescriptors: u32,
-    BaseShaderRegister: u32,
-    RegisterSpace: u32,
-    OffsetInDescriptorsFromTableStart: u32,
+    NumDescriptors: u32 = 0,
+    BaseShaderRegister: u32 = 0,
+    RegisterSpace: u32 = 0,
+    OffsetInDescriptorsFromTableStart: u32 = 0xffffffff,
+
+    pub fn init(RangeType: D3D12_DESCRIPTOR_RANGE_TYPE, NumDescriptors: u32, BaseShaderRegister: u32) @This() {
+        return .{
+            .RangeType = RangeType,
+            .NumDescriptors = NumDescriptors,
+            .BaseShaderRegister = BaseShaderRegister,
+        };
+    }
 };
 
 pub const D3D12_ROOT_DESCRIPTOR_TABLE = extern struct {
@@ -2866,6 +2874,22 @@ pub const D3D12_ROOT_PARAMETER = extern struct {
         Descriptor: D3D12_ROOT_DESCRIPTOR,
     },
     ShaderVisibility: D3D12_SHADER_VISIBILITY,
+
+    pub fn initDescriptorTable(
+        ranges: []const D3D12_DESCRIPTOR_RANGE,
+        ShaderVisibility: D3D12_SHADER_VISIBILITY,
+    ) @This() {
+        return .{
+            .ParameterType = .DESCRIPTOR_TABLE,
+            .Anonymous = .{
+                .DescriptorTable = .{
+                    .NumDescriptorRanges = @intCast(ranges.len),
+                    .pDescriptorRanges = @ptrCast(ranges.ptr),
+                },
+            },
+            .ShaderVisibility = ShaderVisibility,
+        };
+    }
 };
 
 pub const D3D12_ROOT_SIGNATURE_FLAGS = enum(u32) {
