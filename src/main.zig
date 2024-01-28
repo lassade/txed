@@ -25,13 +25,9 @@ const GPUDescHeap = help.GPUDescHeap;
 
 const Font = struct {
     info: tt.FontInfo,
-    data: ?[]u8 = null,
+    data: []u8,
 
-    fn init(data: []const u8) !Font {
-        return .{ .info = try tt.FontInfo.init(data, 0) };
-    }
-
-    fn initSystemFont(hwnd: wf.HWND, font_name: [:0]const u8) !Font {
+    fn initSystemFont(allocator: Allocator, hwnd: wf.HWND, font_name: [:0]const u8) !Font {
         var ps: gdi.PAINTSTRUCT = undefined;
         const hdc = gdi.BeginPaint(hwnd, &ps);
         const hfont = gdi.CreateFontA(
@@ -55,7 +51,7 @@ const Font = struct {
         _ = gdi.SelectObject(hdc, hfont);
         const fond_data_size = gdi.GetFontData(hdc, 0, 0, null, 0);
 
-        const data = try std.heap.page_allocator.alloc(u8, fond_data_size);
+        const data = try allocator.alloc(u8, fond_data_size);
         _ = gdi.GetFontData(hdc, 0, 0, @ptrCast(data.ptr), fond_data_size);
         _ = gdi.EndPaint(hwnd, &ps);
 
@@ -65,8 +61,8 @@ const Font = struct {
         };
     }
 
-    fn deinit(self: *Font) void {
-        if (self.data) |data| std.heap.page_allocator.free(data);
+    fn deinit(self: *Font, allocator: Allocator) void {
+        allocator.free(self.data);
     }
 };
 
@@ -83,17 +79,14 @@ const App = struct {
         color: u32,
     };
 
-    const Cursor = struct {
-        pos: [2]u32,
-        x: u32,
-    };
-
     const Config = extern struct {
         slot_size: [2]u32,
         font_atlas_size: [2]u32,
         console_size: [2]u32,
         bg_color: [4]f32,
     };
+
+    allocator: Allocator,
 
     hwnd: wf.HWND,
 
@@ -137,14 +130,16 @@ const App = struct {
     config_buffer: GPUBuffer,
 
     console: []Char,
+    console_dirty: bool,
     console_buffer: GPUBuffer,
     console_size: [2]u32,
-    // cursors: std.ArrayList(Cursor),
 
     console_output: *dx12.ID3D12Resource,
     console_output_desc_offset: u64,
 
-    fn init(hwnd: wf.HWND, size: [2]u32) !App {
+    files: std.ArrayListUnmanaged(TextFile),
+
+    fn init(allocator: Allocator, hwnd: wf.HWND, size: [2]u32) !App {
         var dxgi_factory_flags: u32 = 0;
 
         if (builtin.mode == .Debug) {
@@ -415,6 +410,8 @@ const App = struct {
         }
 
         var self = App{
+            .allocator = allocator,
+
             .hwnd = hwnd,
 
             .screen_size = size,
@@ -469,11 +466,14 @@ const App = struct {
             .config_buffer = undefined,
 
             .console = undefined,
+            .console_dirty = false,
             .console_buffer = undefined,
             .console_size = undefined,
 
             .console_output = undefined,
             .console_output_desc_offset = undefined,
+
+            .files = .{},
         };
 
         self.srv_heap = try GPUDescHeap.init(device, .CBV_SRV_UAV, 16, .SHADER_VISIBLE);
@@ -497,9 +497,8 @@ const App = struct {
         const staging_buffer = &self.staging_buffers[self.frame_index];
 
         // load font
-        self.font = try Font.initSystemFont(hwnd, "Consolas");
-        //self.font = try Font.init(@embedFile("fonts/intro.otf"));
-        errdefer self.font.deinit();
+        self.font = try Font.initSystemFont(allocator, hwnd, "Consolas");
+        errdefer self.font.deinit(allocator);
 
         self.font_size = 18.0;
         self.font_atlas_size = .{ 1024, 512 };
@@ -515,15 +514,16 @@ const App = struct {
         const ascent: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(v_metrics.ascent)) * self.font_scale) + 1.0); // account for rounding error
         self.slot_size[0] = @intFromFloat(@ceil(@as(f32, @floatFromInt(h_metrics.advance_width)) * self.font_scale));
         self.slot_size[1] = @intFromFloat(@ceil(@as(f32, @floatFromInt(v_metrics.ascent - v_metrics.descent)) * self.font_scale));
-        self.font_atlas_slot_pos = .{ 0, 0 };
+        self.font_atlas_slot_pos = .{ 1, 0 };
         self.font_atlas_slot_count_per_dim[0] = self.font_atlas_size[0] / self.slot_size[0];
         self.font_atlas_slot_count_per_dim[1] = self.font_atlas_size[1] / self.slot_size[1];
         self.font_atlas_slot_count = self.font_atlas_slot_count_per_dim[0] * self.font_atlas_slot_count_per_dim[1];
+        try self.unicode_map.append(allocator, 0xffff_ffff);
 
         // update console
         // todo: free previous console on resize
         self.console_size = .{ self.screen_size[0] / self.slot_size[0], self.screen_size[1] / self.slot_size[1] };
-        self.console = try std.heap.page_allocator.alloc(Char, self.console_size[0] * self.console_size[1]);
+        self.console = try allocator.alloc(Char, self.console_size[0] * self.console_size[1]);
         const console_byte_len: u32 = @intCast(@sizeOf(Char) * self.console.len);
         // todo: console buffer only grows
         self.console_buffer = try GPUBuffer.init(self.device, console_byte_len, .DEFAULT, .COPY_DEST);
@@ -546,8 +546,10 @@ const App = struct {
             },
             srv_cpu.offset(self.console_buffer.desc_offset),
         );
-        errdefer std.heap.page_allocator.free(self.console);
+        errdefer allocator.free(self.console);
         errdefer self.console_buffer.deinit();
+
+        self.clearConsole();
 
         // update config buffer
         {
@@ -567,37 +569,15 @@ const App = struct {
             );
         }
 
-        // insert random data on the console
-        {
-            var x128 = std.rand.Xoroshiro128.init(47);
-            var rng = x128.random();
-            for (0..self.console.len) |i| {
-                self.console[i] = .{
-                    .index = rng.intRangeLessThan(u32, 0, 128),
-                    .color = 0xffffffff,
-                };
-            }
-
-            const console_bytes = std.mem.sliceAsBytes(self.console);
-            const result = try staging_buffer.alloc(console_bytes.len);
-            @memcpy(result.cpu_slice, console_bytes);
-            self.command_list.copyBufferRegion(
-                self.console_buffer.heap,
-                0,
-                staging_buffer.buffer.heap,
-                result.offset,
-                @intCast(console_bytes.len),
-            );
-        }
-
         // pre cache font_strip characteres
         const strip_height = (128 / self.font_atlas_slot_count_per_dim[0] + 1) * self.slot_size[1];
         var font_strip: []u8 = &.{};
         {
-            font_strip = try std.heap.page_allocator.alloc(u8, self.font_atlas_size[0] * strip_height);
+            font_strip = try allocator.alloc(u8, self.font_atlas_size[0] * strip_height);
             @memset(font_strip, 0);
 
-            try self.unicode_map.ensureTotalCapacity(std.heap.page_allocator, 128);
+            try self.unicode_map.ensureTotalCapacity(allocator, 128);
+            // self.unicode_map.appendAssumeCapacity(0xffffffff);
 
             for (0..128) |unicode| {
                 const c: u8 = @intCast(unicode);
@@ -637,98 +617,96 @@ const App = struct {
                 }
             }
         }
-        defer std.heap.page_allocator.free(font_strip);
+        defer allocator.free(font_strip);
 
         // create font atlas texture
-        {
-            try hrErrorOnFail(self.device.createCommittedResource(
-                &dx12.D3D12_HEAP_PROPERTIES{},
-                .NONE,
-                &dx12.D3D12_RESOURCE_DESC{
-                    .Dimension = .TEXTURE2D,
-                    .Alignment = 0,
-                    .Width = @intCast(self.font_atlas_size[0]),
-                    .Height = @intCast(self.font_atlas_size[1]),
-                    .DepthOrArraySize = 1,
-                    .MipLevels = 1,
-                    .Format = font_format,
-                    .SampleDesc = .{ .Count = 1, .Quality = 0 },
-                    .Layout = .UNKNOWN,
-                    .Flags = .NONE,
-                },
-                .COPY_DEST,
-                null,
-                dx12.IID_ID3D12Resource,
-                @ptrCast(&self.font_atlas),
-            ));
-            errdefer _ = self.font_atlas.release();
+        try hrErrorOnFail(self.device.createCommittedResource(
+            &dx12.D3D12_HEAP_PROPERTIES{},
+            .NONE,
+            &dx12.D3D12_RESOURCE_DESC{
+                .Dimension = .TEXTURE2D,
+                .Alignment = 0,
+                .Width = @intCast(self.font_atlas_size[0]),
+                .Height = @intCast(self.font_atlas_size[1]),
+                .DepthOrArraySize = 1,
+                .MipLevels = 1,
+                .Format = font_format,
+                .SampleDesc = .{ .Count = 1, .Quality = 0 },
+                .Layout = .UNKNOWN,
+                .Flags = .NONE,
+            },
+            .COPY_DEST,
+            null,
+            dx12.IID_ID3D12Resource,
+            @ptrCast(&self.font_atlas),
+        ));
+        errdefer _ = self.font_atlas.release();
 
-            const result = try staging_buffer.alloc(font_strip.len);
-            @memcpy(result.cpu_slice, font_strip);
+        const result = try staging_buffer.alloc(font_strip.len);
+        @memcpy(result.cpu_slice, font_strip);
 
-            command_list.copyTextureRegion(
-                &dx12.D3D12_TEXTURE_COPY_LOCATION{
-                    .pResource = self.font_atlas,
-                    .Type = .SUBRESOURCE_INDEX,
-                    .Anonymous = .{ .SubresourceIndex = 0 },
-                },
-                0,
-                0,
-                0,
-                &dx12.D3D12_TEXTURE_COPY_LOCATION{
-                    .pResource = staging_buffer.buffer.heap,
-                    .Type = .PLACED_FOOTPRINT,
-                    .Anonymous = .{
-                        .PlacedFootprint = dx12.D3D12_PLACED_SUBRESOURCE_FOOTPRINT{
-                            .Offset = result.offset,
-                            .Footprint = dx12.D3D12_SUBRESOURCE_FOOTPRINT{
-                                .Format = font_format,
-                                .Width = @intCast(self.font_atlas_size[0]),
-                                .Height = @intCast(strip_height),
-                                .Depth = 1,
-                                .RowPitch = @intCast(font_stride),
-                            },
+        command_list.copyTextureRegion(
+            &dx12.D3D12_TEXTURE_COPY_LOCATION{
+                .pResource = self.font_atlas,
+                .Type = .SUBRESOURCE_INDEX,
+                .Anonymous = .{ .SubresourceIndex = 0 },
+            },
+            0,
+            0,
+            0,
+            &dx12.D3D12_TEXTURE_COPY_LOCATION{
+                .pResource = staging_buffer.buffer.heap,
+                .Type = .PLACED_FOOTPRINT,
+                .Anonymous = .{
+                    .PlacedFootprint = dx12.D3D12_PLACED_SUBRESOURCE_FOOTPRINT{
+                        .Offset = result.offset,
+                        .Footprint = dx12.D3D12_SUBRESOURCE_FOOTPRINT{
+                            .Format = font_format,
+                            .Width = @intCast(self.font_atlas_size[0]),
+                            .Height = @intCast(strip_height),
+                            .Depth = 1,
+                            .RowPitch = @intCast(font_stride),
                         },
                     },
                 },
-                null,
-            );
+            },
+            null,
+        );
 
-            command_list.resourceBarrier(
-                1,
-                @ptrCast(&dx12.D3D12_RESOURCE_BARRIER{
-                    .Type = .TRANSITION,
-                    .Flags = .NONE,
-                    .Anonymous = .{
-                        .Transition = dx12.D3D12_RESOURCE_TRANSITION_BARRIER{
-                            .pResource = self.font_atlas,
-                            .Subresource = 0,
-                            .StateBefore = .COPY_DEST,
-                            .StateAfter = .PIXEL_SHADER_RESOURCE,
-                        },
-                    },
-                }),
-            );
-
-            self.font_atlas_desc_offset = try self.srv_heap.alloc();
-            self.device.createShaderResourceView(
-                self.font_atlas,
-                &dx12.D3D12_SHADER_RESOURCE_VIEW_DESC{
-                    .Shader4ComponentMapping = dx12.D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                    .Format = font_format,
-                    .ViewDimension = .TEXTURE2D,
-                    .Anonymous = .{
-                        .Texture2D = .{
-                            .MostDetailedMip = 0,
-                            .MipLevels = 1,
-                            .PlaneSlice = 0,
-                            .ResourceMinLODClamp = 0.0,
-                        },
+        command_list.resourceBarrier(
+            1,
+            @ptrCast(&dx12.D3D12_RESOURCE_BARRIER{
+                .Type = .TRANSITION,
+                .Flags = .NONE,
+                .Anonymous = .{
+                    .Transition = dx12.D3D12_RESOURCE_TRANSITION_BARRIER{
+                        .pResource = self.font_atlas,
+                        .Subresource = 0,
+                        .StateBefore = .COPY_DEST,
+                        .StateAfter = .PIXEL_SHADER_RESOURCE,
                     },
                 },
-                srv_cpu.offset(self.font_atlas_desc_offset),
-            );
-        }
+            }),
+        );
+
+        self.font_atlas_desc_offset = try self.srv_heap.alloc();
+        self.device.createShaderResourceView(
+            self.font_atlas,
+            &dx12.D3D12_SHADER_RESOURCE_VIEW_DESC{
+                .Shader4ComponentMapping = dx12.D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                .Format = font_format,
+                .ViewDimension = .TEXTURE2D,
+                .Anonymous = .{
+                    .Texture2D = .{
+                        .MostDetailedMip = 0,
+                        .MipLevels = 1,
+                        .PlaneSlice = 0,
+                        .ResourceMinLODClamp = 0.0,
+                    },
+                },
+            },
+            srv_cpu.offset(self.font_atlas_desc_offset),
+        );
 
         // create compute output texture
         try hrErrorOnFail(self.device.createCommittedResource(
@@ -770,6 +748,15 @@ const App = struct {
             srv_cpu.offset(self.console_output_desc_offset),
         );
 
+        if (builtin.mode == .Debug) {
+            if (TextFile.open(allocator, "src/main.zig")) |file| {
+                try self.files.append(allocator, file);
+                self.viewFile(0);
+            } else |_| {
+                // do nothing
+            }
+        }
+
         // upload resources
         {
             try hrErrorOnFail(self.command_list.close());
@@ -789,12 +776,18 @@ const App = struct {
 
         _ = self.console_output.release();
 
-        std.heap.page_allocator.free(self.console);
+        for (self.files.items) |*file| {
+            file.flush() catch {};
+            file.deinit(self.allocator);
+        }
+        self.files.deinit(self.allocator);
+
+        self.allocator.free(self.console);
         self.console_buffer.deinit();
 
-        self.unicode_map.deinit(std.heap.page_allocator);
+        self.unicode_map.deinit(self.allocator);
         _ = self.font_atlas.release();
-        self.font.deinit();
+        self.font.deinit(self.allocator);
 
         _ = self.pipeline_state.release();
         _ = self.root_sig.release();
@@ -823,9 +816,62 @@ const App = struct {
         _ = self.device.release();
     }
 
+    fn clearConsole(self: *App) void {
+        @memset(self.console, Char{ .index = 0, .color = 0xffffffff });
+        self.console_dirty = true;
+    }
+
+    fn viewFile(self: *App, file_index: usize) void {
+        if (self.files.items.len <= file_index) {
+            self.clearConsole();
+            return;
+        }
+
+        const file = &self.files.items[file_index];
+
+        var i: usize = 0;
+        for (0..self.console_size[1]) |y| {
+            for (0..self.console_size[0]) |x| {
+                var char = Char{ .index = 0, .color = 0xffffffff };
+
+                if (y < file.lines.len) {
+                    const line = file.lines.items(.data)[y];
+                    if (x < line.items.len) {
+                        // todo: read unicode char
+                        const unicode: u32 = line.items[x];
+                        if (std.mem.indexOfScalar(u32, self.unicode_map.items, unicode)) |index| {
+                            char.index = @intCast(index);
+                        }
+                    }
+                }
+
+                self.console[i] = char;
+                i += 1;
+            }
+        }
+
+        self.console_dirty = true;
+    }
+
     fn tick(self: *App) !void {
         try hrErrorOnFail(self.command_allocator.reset());
         try hrErrorOnFail(self.command_list.reset(self.command_allocator, self.pipeline_state));
+
+        const staging_buffer = &self.staging_buffers[self.frame_index];
+
+        if (self.console_dirty) {
+            const console_bytes = std.mem.sliceAsBytes(self.console);
+            const result = try staging_buffer.alloc(console_bytes.len);
+            @memcpy(result.cpu_slice, console_bytes);
+            self.command_list.copyBufferRegion(
+                self.console_buffer.heap,
+                0,
+                staging_buffer.buffer.heap,
+                result.offset,
+                @intCast(console_bytes.len),
+            );
+            self.console_dirty = false;
+        }
 
         self.command_list.setComputeRootSignature(self.root_sig);
         const heaps = [_]*dx12.ID3D12DescriptorHeap{self.srv_heap.heap};
@@ -957,6 +1003,104 @@ const App = struct {
     }
 };
 
+const TextFile = struct {
+    file: ?std.fs.File,
+    size: u64,
+    lines: std.MultiArrayList(Line),
+    cursors: std.ArrayListUnmanaged(Cursor),
+
+    // scroll_pos: ...
+
+    pub const Line = struct {
+        data: std.ArrayListUnmanaged(u8),
+        //offset: u64,
+    };
+
+    pub const Cursor = struct {
+        pos: [2]u32,
+        x: u32,
+    };
+
+    pub fn deinit(self: *TextFile, allocator: Allocator) void {
+        self.clear(allocator);
+        self.lines.deinit(allocator);
+    }
+
+    pub fn clear(self: *TextFile, allocator: Allocator) void {
+        for (self.lines.items(.data)) |*data| {
+            data.deinit(allocator);
+        }
+        self.lines.len = 0;
+    }
+
+    pub fn open(allocator: Allocator, path: []const u8) !TextFile {
+        const realpath = try std.fs.cwd().realpathAlloc(allocator, path);
+        defer allocator.free(realpath);
+
+        const file = try std.fs.openFileAbsolute(realpath, .{ .mode = .read_write });
+        const size: u64 = @intCast(try file.getEndPos());
+
+        var self = TextFile{
+            .file = file,
+            .size = size,
+            .lines = .{},
+            .cursors = .{},
+        };
+
+        try self.readFile(allocator);
+
+        return self;
+    }
+
+    pub fn readFile(self: *TextFile, allocator: Allocator) !void {
+        if (self.file) |file| {
+            try file.seekTo(0);
+
+            const buffer = try allocator.alloc(u8, @intCast(self.size));
+            defer allocator.free(buffer);
+
+            self.clear(allocator);
+
+            _ = try file.readAll(buffer);
+
+            // break down the file into multiple lines
+            var buffer_view = buffer;
+            while (std.mem.indexOfScalar(u8, buffer_view, '\n')) |line_end| {
+                // account for the \r\n line end style
+                var len = line_end;
+                if (line_end > 0 and buffer_view[line_end - 1] == '\r') {
+                    len -= 1;
+                }
+
+                // todo: handle the case where the line is very long
+
+                var line = Line{ .data = .{} };
+                try line.data.ensureTotalCapacity(allocator, len);
+                line.data.appendSliceAssumeCapacity(buffer_view[0..len]);
+                try self.lines.append(allocator, line);
+
+                buffer_view = buffer_view[line_end + 1 ..];
+
+                // insert an empty last line
+                if (buffer_view.len == 0) {
+                    try self.lines.append(allocator, Line{ .data = .{} });
+                    return;
+                }
+            }
+
+            if (buffer_view.len > 0) {
+                var line = Line{ .data = .{} };
+                try line.data.appendSlice(allocator, buffer_view);
+                try self.lines.append(allocator, line);
+            }
+        }
+    }
+
+    pub fn flush(self: *TextFile) !void {
+        _ = self; // autofix
+    }
+};
+
 fn windowProc(
     hwnd: wf.HWND,
     umsg: u32,
@@ -1050,7 +1194,10 @@ pub fn main() !void {
         &app, // additional application data
     ).?;
 
-    app = try App.init(hwnd, .{ w, h });
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer if (gpa.deinit() == .leak) @panic("memory leak");
+
+    app = try App.init(gpa.allocator(), hwnd, .{ w, h });
     defer app.deinit();
 
     _ = wm.ShowWindow(hwnd, .SHOWDEFAULT);
