@@ -21,6 +21,7 @@ const help = @import("help.zig");
 const hrErrorOnFail = help.hrErrorOnFail;
 const GPUBuffer = help.GPUBuffer;
 const GPUStagingBuffer = help.GPUStagingBuffer;
+const GPUDescHeap = help.GPUDescHeap;
 
 const Font = struct {
     info: tt.FontInfo,
@@ -104,7 +105,7 @@ const App = struct {
     device: *dx12.ID3D12Device,
     command_queue: *dx12.ID3D12CommandQueue,
     swap_chain: *dxgi.IDXGISwapChain3,
-    srv_heap: *dx12.ID3D12DescriptorHeap,
+    srv_heap: GPUDescHeap,
     rtv_heap: *dx12.ID3D12DescriptorHeap,
     rtv_desc_size: u32,
     render_targets: [frame_count]*dx12.ID3D12Resource,
@@ -126,6 +127,7 @@ const App = struct {
     font_scale: f32,
     slot_size: [2]u32,
     font_atlas: *dx12.ID3D12Resource,
+    font_atlas_desc_offset: u64,
     font_atlas_size: [2]u32,
     font_atlas_slot_pos: [2]u32,
     font_atlas_slot_count_per_dim: [2]u32,
@@ -138,6 +140,9 @@ const App = struct {
     console_buffer: GPUBuffer,
     console_size: [2]u32,
     // cursors: std.ArrayList(Cursor),
+
+    console_output: *dx12.ID3D12Resource,
+    console_output_desc_offset: u64,
 
     fn init(hwnd: wf.HWND, size: [2]u32) !App {
         var dxgi_factory_flags: u32 = 0;
@@ -273,18 +278,6 @@ const App = struct {
 
         // create descriptor heaps.
         // describe and create a render target view (RTV) descriptor heap.
-        var srv_heap: *dx12.ID3D12DescriptorHeap = undefined;
-        try hrErrorOnFail(device.createDescriptorHeap(
-            &dx12.D3D12_DESCRIPTOR_HEAP_DESC{
-                .Type = .CBV_SRV_UAV,
-                .NumDescriptors = frame_count,
-                .Flags = .SHADER_VISIBLE,
-                .NodeMask = 0,
-            },
-            dx12.IID_ID3D12DescriptorHeap,
-            @ptrCast(&srv_heap),
-        ));
-        errdefer _ = srv_heap.release();
         var rtv_heap: *dx12.ID3D12DescriptorHeap = undefined;
         try hrErrorOnFail(device.createDescriptorHeap(
             &dx12.D3D12_DESCRIPTOR_HEAP_DESC{
@@ -421,13 +414,6 @@ const App = struct {
             staging_buffers_len += 1;
         }
 
-        const config_buffer = try GPUBuffer.init(
-            device,
-            std.mem.alignForward(u64, @sizeOf(Config), 256),
-            .DEFAULT,
-            .COPY_DEST,
-        );
-
         var self = App{
             .hwnd = hwnd,
 
@@ -451,7 +437,7 @@ const App = struct {
             .device = device,
             .command_queue = command_queue,
             .swap_chain = swap_chain3,
-            .srv_heap = srv_heap,
+            .srv_heap = undefined,
             .rtv_heap = rtv_heap,
             .rtv_desc_size = rtv_desc_size,
             .render_targets = render_targets,
@@ -473,18 +459,40 @@ const App = struct {
             .font_scale = undefined,
             .slot_size = undefined,
             .font_atlas = undefined,
+            .font_atlas_desc_offset = undefined,
             .font_atlas_size = undefined,
             .font_atlas_slot_pos = undefined,
             .font_atlas_slot_count_per_dim = undefined,
             .font_atlas_slot_count = undefined,
             .unicode_map = .{},
 
-            .config_buffer = config_buffer,
+            .config_buffer = undefined,
 
             .console = undefined,
             .console_buffer = undefined,
             .console_size = undefined,
+
+            .console_output = undefined,
+            .console_output_desc_offset = undefined,
         };
+
+        self.srv_heap = try GPUDescHeap.init(device, .CBV_SRV_UAV, 16, .SHADER_VISIBLE);
+        const srv_cpu = self.srv_heap.heap.getCPUDescriptorHandleForHeapStart();
+
+        self.config_buffer = try GPUBuffer.init(
+            device,
+            std.mem.alignForward(u64, @sizeOf(Config), 256),
+            .DEFAULT,
+            .COPY_DEST,
+        );
+        self.config_buffer.desc_offset = try self.srv_heap.alloc();
+        self.device.createConstantBufferView(
+            &dx12.D3D12_CONSTANT_BUFFER_VIEW_DESC{
+                .BufferLocation = self.config_buffer.heap.getGPUVirtualAddress(),
+                .SizeInBytes = @intCast(self.config_buffer.capacity),
+            },
+            srv_cpu.offset(self.config_buffer.desc_offset),
+        );
 
         const staging_buffer = &self.staging_buffers[self.frame_index];
 
@@ -513,13 +521,30 @@ const App = struct {
         self.font_atlas_slot_count = self.font_atlas_slot_count_per_dim[0] * self.font_atlas_slot_count_per_dim[1];
 
         // update console
+        // todo: free previous console on resize
         self.console_size = .{ self.screen_size[0] / self.slot_size[0], self.screen_size[1] / self.slot_size[1] };
         self.console = try std.heap.page_allocator.alloc(Char, self.console_size[0] * self.console_size[1]);
-        self.console_buffer = try GPUBuffer.init(
-            self.device,
-            @intCast(@sizeOf(Char) * self.console.len),
-            .DEFAULT,
-            .COPY_DEST,
+        const console_byte_len: u32 = @intCast(@sizeOf(Char) * self.console.len);
+        // todo: console buffer only grows
+        self.console_buffer = try GPUBuffer.init(self.device, console_byte_len, .DEFAULT, .COPY_DEST);
+        // note: allocation on the srv heap must be only done once
+        self.console_buffer.desc_offset = try self.srv_heap.alloc();
+        self.device.createShaderResourceView(
+            self.console_buffer.heap,
+            &dx12.D3D12_SHADER_RESOURCE_VIEW_DESC{
+                .Format = .UNKNOWN,
+                .ViewDimension = .BUFFER,
+                .Shader4ComponentMapping = dx12.D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                .Anonymous = .{
+                    .Buffer = .{
+                        .FirstElement = 0,
+                        .NumElements = @intCast(self.console.len),
+                        .StructureByteStride = @sizeOf(Char),
+                        .Flags = .NONE,
+                    },
+                },
+            },
+            srv_cpu.offset(self.console_buffer.desc_offset),
         );
         errdefer std.heap.page_allocator.free(self.console);
         errdefer self.console_buffer.deinit();
@@ -617,13 +642,7 @@ const App = struct {
         // create font atlas texture
         {
             try hrErrorOnFail(self.device.createCommittedResource(
-                &dx12.D3D12_HEAP_PROPERTIES{
-                    .Type = .DEFAULT,
-                    .CPUPageProperty = .UNKNOWN,
-                    .MemoryPoolPreference = .UNKNOWN,
-                    .CreationNodeMask = 1,
-                    .VisibleNodeMask = 1,
-                },
+                &dx12.D3D12_HEAP_PROPERTIES{},
                 .NONE,
                 &dx12.D3D12_RESOURCE_DESC{
                     .Dimension = .TEXTURE2D,
@@ -691,6 +710,7 @@ const App = struct {
                 }),
             );
 
+            self.font_atlas_desc_offset = try self.srv_heap.alloc();
             self.device.createShaderResourceView(
                 self.font_atlas,
                 &dx12.D3D12_SHADER_RESOURCE_VIEW_DESC{
@@ -706,9 +726,49 @@ const App = struct {
                         },
                     },
                 },
-                self.srv_heap.getCPUDescriptorHandleForHeapStart(),
+                srv_cpu.offset(self.font_atlas_desc_offset),
             );
         }
+
+        // create compute output texture
+        try hrErrorOnFail(self.device.createCommittedResource(
+            &dx12.D3D12_HEAP_PROPERTIES{},
+            .NONE,
+            &dx12.D3D12_RESOURCE_DESC{
+                .Dimension = .TEXTURE2D,
+                .Alignment = 0,
+                .Width = @intCast(self.screen_size[0]),
+                .Height = @intCast(self.screen_size[1]),
+                .DepthOrArraySize = 1,
+                .MipLevels = 1,
+                .Format = .R8G8B8A8_UNORM,
+                .SampleDesc = .{ .Count = 1, .Quality = 0 },
+                .Layout = .UNKNOWN,
+                .Flags = .ALLOW_UNORDERED_ACCESS,
+            },
+            .UNORDERED_ACCESS,
+            null,
+            dx12.IID_ID3D12Resource,
+            @ptrCast(&self.console_output),
+        ));
+        errdefer _ = self.console_output.release();
+
+        self.console_output_desc_offset = try self.srv_heap.alloc();
+        self.device.createUnorderedAccessView(
+            self.console_output,
+            null,
+            &dx12.D3D12_UNORDERED_ACCESS_VIEW_DESC{
+                .Format = .R8G8B8A8_UNORM,
+                .ViewDimension = .TEXTURE2D,
+                .Anonymous = .{
+                    .Texture2D = .{
+                        .MipSlice = 0,
+                        .PlaneSlice = 0,
+                    },
+                },
+            },
+            srv_cpu.offset(self.console_output_desc_offset),
+        );
 
         // upload resources
         {
@@ -727,6 +787,8 @@ const App = struct {
     fn deinit(self: *App) void {
         self.waitForPreviousFrame() catch {};
 
+        _ = self.console_output.release();
+
         std.heap.page_allocator.free(self.console);
         self.console_buffer.deinit();
 
@@ -738,6 +800,8 @@ const App = struct {
         _ = self.root_sig.release();
 
         self.config_buffer.deinit();
+
+        self.srv_heap.deinit();
 
         for (0..frame_count) |i| {
             self.staging_buffers[i].deinit();
@@ -754,7 +818,6 @@ const App = struct {
         }
 
         _ = self.rtv_heap.release();
-        _ = self.srv_heap.release();
         _ = self.swap_chain.release();
         _ = self.command_queue.release();
         _ = self.device.release();
@@ -764,51 +827,86 @@ const App = struct {
         try hrErrorOnFail(self.command_allocator.reset());
         try hrErrorOnFail(self.command_list.reset(self.command_allocator, self.pipeline_state));
 
-        // set necessary state.
-        self.command_list.setGraphicsRootSignature(self.root_sig);
-        // self.command_list.setDescriptorHeaps(1, @ptrCast(&self.srv_heap));
-        // self.command_list.setGraphicsRootDescriptorTable(0, );
-        // self.command_list.setGraphicsRootDescriptorTable(1, self.srv_heap.getGPUDescriptorHandleForHeapStart());
-        // self.command_list.setGraphicsRootDescriptorTable(2, self.srv_heap.getGPUDescriptorHandleForHeapStart());
-        // self.command_list.setGraphicsRootDescriptorTable(3, self.srv_heap.getGPUDescriptorHandleForHeapStart());
-        self.command_list.rsSetViewports(1, @ptrCast(&self.viewport));
-        self.command_list.rsSetScissorRects(1, @ptrCast(&self.scissor_rect));
+        self.command_list.setComputeRootSignature(self.root_sig);
+        const heaps = [_]*dx12.ID3D12DescriptorHeap{self.srv_heap.heap};
+        self.command_list.setDescriptorHeaps(@intCast(heaps.len), @constCast(@ptrCast(&heaps)));
+        const srv_gpu = self.srv_heap.heap.getGPUDescriptorHandleForHeapStart();
+        self.command_list.setComputeRootDescriptorTable(0, srv_gpu.offset(self.config_buffer.desc_offset));
+        self.command_list.setComputeRootDescriptorTable(1, srv_gpu.offset(self.console_buffer.desc_offset));
+        self.command_list.setComputeRootDescriptorTable(2, srv_gpu.offset(self.font_atlas_desc_offset));
+        self.command_list.setComputeRootDescriptorTable(3, srv_gpu.offset(self.console_output_desc_offset));
+        self.command_list.dispatch((self.console_size[0] / 16) + 1, (self.console_size[1] / 16) + 1, 1);
 
-        // indicate that the back buffer will be used as a render target.
         self.command_list.resourceBarrier(
             1,
             @ptrCast(&dx12.D3D12_RESOURCE_BARRIER{
                 .Type = .TRANSITION,
                 .Flags = .NONE,
                 .Anonymous = .{ .Transition = .{
-                    .pResource = self.render_targets[self.frame_index],
-                    .StateBefore = .COMMON,
-                    .StateAfter = .RENDER_TARGET,
+                    .pResource = self.console_output,
+                    .StateBefore = .UNORDERED_ACCESS,
+                    .StateAfter = .COPY_SOURCE,
                     .Subresource = 0xffffffff,
                 } },
             }),
         );
 
-        var rtv_handle = self.rtv_heap.getCPUDescriptorHandleForHeapStart();
-        rtv_handle.ptr += self.frame_index * self.rtv_desc_size;
-        self.command_list.omSetRenderTargets(1, &rtv_handle, wz.FALSE, null);
+        const render_target = self.render_targets[self.frame_index];
 
-        // record commands.
-        const clearColor = [4]f32{ 0.0, 0.2, 0.4, 1.0 };
-        self.command_list.clearRenderTargetView(rtv_handle, @ptrCast(&clearColor), 0, null);
-
-        // self.command_list.dispatch((self.console_size[0] / 16) + 1, (self.console_size[1] / 16) + 1, 1);
-
-        // indicate that the back buffer will now be used to present.
         self.command_list.resourceBarrier(
             1,
             @ptrCast(&dx12.D3D12_RESOURCE_BARRIER{
                 .Type = .TRANSITION,
                 .Flags = .NONE,
                 .Anonymous = .{ .Transition = .{
-                    .pResource = self.render_targets[self.frame_index],
-                    .StateBefore = .RENDER_TARGET,
+                    .pResource = render_target,
+                    .StateBefore = .COMMON,
+                    .StateAfter = .COPY_DEST,
+                    .Subresource = 0xffffffff,
+                } },
+            }),
+        );
+
+        self.command_list.copyTextureRegion(
+            &dx12.D3D12_TEXTURE_COPY_LOCATION{
+                .pResource = render_target,
+                .Type = .SUBRESOURCE_INDEX,
+                .Anonymous = .{ .SubresourceIndex = 0 },
+            },
+            0,
+            0,
+            0,
+            &dx12.D3D12_TEXTURE_COPY_LOCATION{
+                .pResource = self.console_output,
+                .Type = .SUBRESOURCE_INDEX,
+                .Anonymous = .{ .SubresourceIndex = 0 },
+            },
+            null,
+        );
+
+        self.command_list.resourceBarrier(
+            1,
+            @ptrCast(&dx12.D3D12_RESOURCE_BARRIER{
+                .Type = .TRANSITION,
+                .Flags = .NONE,
+                .Anonymous = .{ .Transition = .{
+                    .pResource = render_target,
+                    .StateBefore = .COPY_DEST,
                     .StateAfter = .COMMON,
+                    .Subresource = 0xffffffff,
+                } },
+            }),
+        );
+
+        self.command_list.resourceBarrier(
+            1,
+            @ptrCast(&dx12.D3D12_RESOURCE_BARRIER{
+                .Type = .TRANSITION,
+                .Flags = .NONE,
+                .Anonymous = .{ .Transition = .{
+                    .pResource = self.console_output,
+                    .StateBefore = .COPY_SOURCE,
+                    .StateAfter = .UNORDERED_ACCESS,
                     .Subresource = 0xffffffff,
                 } },
             }),

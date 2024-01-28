@@ -1731,11 +1731,11 @@ pub const D3D12_MEMORY_POOL_L0 = D3D12_MEMORY_POOL.L0;
 pub const D3D12_MEMORY_POOL_L1 = D3D12_MEMORY_POOL.L1;
 
 pub const D3D12_HEAP_PROPERTIES = extern struct {
-    Type: D3D12_HEAP_TYPE,
-    CPUPageProperty: D3D12_CPU_PAGE_PROPERTY,
-    MemoryPoolPreference: D3D12_MEMORY_POOL,
-    CreationNodeMask: u32,
-    VisibleNodeMask: u32,
+    Type: D3D12_HEAP_TYPE = .DEFAULT,
+    CPUPageProperty: D3D12_CPU_PAGE_PROPERTY = .UNKNOWN,
+    MemoryPoolPreference: D3D12_MEMORY_POOL = .UNKNOWN,
+    CreationNodeMask: u32 = 1,
+    VisibleNodeMask: u32 = 1,
 };
 
 pub const D3D12_HEAP_FLAGS = enum(u32) {
@@ -3147,10 +3147,18 @@ pub const PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER = *const fn (
 
 pub const D3D12_CPU_DESCRIPTOR_HANDLE = extern struct {
     ptr: usize,
+
+    pub fn offset(self: @This(), val: usize) @This() {
+        return .{ .ptr = self.ptr + val };
+    }
 };
 
 pub const D3D12_GPU_DESCRIPTOR_HANDLE = extern struct {
     ptr: u64,
+
+    pub fn offset(self: @This(), val: u64) @This() {
+        return .{ .ptr = self.ptr + val };
+    }
 };
 
 pub const D3D12_DISCARD_REGION = extern struct {

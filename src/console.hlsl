@@ -27,10 +27,10 @@ void csMain(uint3 id : SV_DispatchThreadID) {
 
     // atlas pos
     uint font_y = c.index / font_atlas_size.x;
-    uint font_x = font_atlas_size.x - (font_y * font_atlas_size.x);
+    uint font_x = c.index - (font_y * font_atlas_size.x);
 
-    // invert bg/fg
-    // int flags = c.color & 0x000000ff;
+    // todo: int flags = c.color & 0x000000ff;
+    // for things like invert bg/fg
 
     float4 fg_color = float4(
         float(c.color & 0xff000000 >> 24) / 255.0,
@@ -39,12 +39,10 @@ void csMain(uint3 id : SV_DispatchThreadID) {
         1.0
     );
 
-    // todo: decode Char.color
-
     for (uint x = 0; x < slot_size.x; x++) {
         for (uint y = 0; y < slot_size.y; y++) {
             float alpha = font_atlas[uint2(slot_size.x * font_x + x, slot_size.y * font_y + y)];
-            output[uint2(slot_size.x * id.x + x, slot_size.y * id.y + y)] = lerp(fg_color, bg_color, alpha);
+            output[uint2(slot_size.x * id.x + x, slot_size.y * id.y + y)] = lerp(bg_color, fg_color, alpha);
         }
     }
 }

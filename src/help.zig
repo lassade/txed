@@ -27,6 +27,7 @@ pub inline fn hrPanicOnFail(hr: wf.HRESULT) void {
 pub const GPUBuffer = struct {
     heap: *dx12.ID3D12Resource,
     capacity: u64,
+    desc_offset: u64,
 
     pub fn init(
         device: *dx12.ID3D12Device,
@@ -69,6 +70,7 @@ pub const GPUBuffer = struct {
         return GPUBuffer{
             .heap = resource,
             .capacity = capacity,
+            .desc_offset = undefined,
         };
     }
 
@@ -133,5 +135,51 @@ pub const GPUStagingBuffer = struct {
         self.len += aligned_size;
 
         return result;
+    }
+};
+
+pub const GPUDescHeap = struct {
+    heap: *dx12.ID3D12DescriptorHeap,
+    offset: u64,
+    size: u32,
+    capacity: u32,
+
+    pub fn init(
+        device: *dx12.ID3D12Device,
+        type_: dx12.D3D12_DESCRIPTOR_HEAP_TYPE,
+        capacity: u32,
+        flags: dx12.D3D12_DESCRIPTOR_HEAP_FLAGS,
+    ) !@This() {
+        var heap: *dx12.ID3D12DescriptorHeap = undefined;
+        try hrErrorOnFail(device.createDescriptorHeap(
+            &dx12.D3D12_DESCRIPTOR_HEAP_DESC{
+                .Type = type_,
+                .NumDescriptors = capacity,
+                .Flags = flags,
+                .NodeMask = 0,
+            },
+            dx12.IID_ID3D12DescriptorHeap,
+            @ptrCast(&heap),
+        ));
+        const size = device.getDescriptorHandleIncrementSize(type_);
+        return @This(){
+            .heap = heap,
+            .offset = 0,
+            .size = size,
+            .capacity = capacity * size,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        _ = self.heap.release();
+    }
+
+    pub fn alloc(self: *@This()) Allocator.Error!u64 {
+        const offset = self.offset;
+        if (offset >= self.capacity) {
+            return Allocator.Error.OutOfMemory;
+        }
+        self.offset += self.size;
+        return offset;
     }
 };
