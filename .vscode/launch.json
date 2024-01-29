@@ -15,5 +15,16 @@
             "environment": [],
             "preLaunchTask": "buildDebug"
         },
+        {
+            "name": "windows/Release",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "./zig-out/ReleaseSafe/txed.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "preLaunchTask": "buildRelease"
+        },
     ]
 }

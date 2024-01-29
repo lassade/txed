@@ -74,9 +74,15 @@ const App = struct {
         uv: [2]f32,
     };
 
-    const Char = extern struct {
-        index: u32,
-        color: u32,
+    const Char = packed struct {
+        index: u32 = 0,
+        color: u24 = 0xff_ff_ff,
+
+        cursor: bool = false,
+        selected: bool = false,
+        line_over: bool = false,
+
+        unused: u5 = 0,
     };
 
     const Config = extern struct {
@@ -755,14 +761,12 @@ const App = struct {
             srv_cpu.offset(self.console_output_desc_offset),
         );
 
-        if (builtin.mode == .Debug) {
-            if (TextFile.open(allocator, "src/main.zig")) |file| {
-                try self.files.append(allocator, file);
-                self.file_index = 0;
-                self.changed.file_view = true;
-            } else |_| {
-                // do nothing
-            }
+        if (TextFile.open(allocator, "src/main.zig")) |file| {
+            try self.files.append(allocator, file);
+            self.file_index = 0;
+            self.changed.file_view = true;
+        } else |_| {
+            // do nothing
         }
 
         // upload resources
@@ -825,7 +829,7 @@ const App = struct {
     }
 
     fn clearConsole(self: *App) void {
-        @memset(self.console, Char{ .index = 0, .color = 0xffffffff });
+        @memset(self.console, Char{});
         self.changed.console = true;
     }
 
@@ -841,7 +845,7 @@ const App = struct {
         var i: usize = 0;
         for (0..self.console_size[1]) |y| {
             for (0..self.console_size[0]) |x| {
-                var char = Char{ .index = 0, .color = 0xffffffff };
+                var char = Char{ .index = 0 };
 
                 const pos = [2]usize{
                     x + file.scroll_pos[0],
@@ -864,15 +868,32 @@ const App = struct {
             }
         }
 
+        // todo: display cursors
+        for (0..file.cursors.items.len) |j| {
+            const cursor = &file.cursors.items[j];
+            const lines_on_screen: u32 = @intCast(file.lines.len -| file.scroll_pos[1]);
+            if (cursor.pos[1] > lines_on_screen) {
+                cursor.pos[1] = lines_on_screen;
+            }
+
+            const line_number = file.scroll_pos[1] + cursor.pos[1];
+            const line_len = file.lines.items(.data)[line_number].items.len;
+            const line_len_on_screen: u32 = @intCast(line_len -| file.scroll_pos[0]);
+            if (cursor.pos[0] > line_len_on_screen) {
+                cursor.x = line_len_on_screen;
+            } else {
+                cursor.x = cursor.pos[0];
+            }
+
+            i = self.console_size[0] * cursor.pos[1] + cursor.x;
+            self.console[i].cursor = true;
+        }
+
         self.changed.file_view = false;
         self.changed.console = true;
     }
 
     fn tick(self: *App) !void {
-        if (@as(u32, @bitCast(self.changed)) == 0) {
-            return;
-        }
-
         try hrErrorOnFail(self.command_allocator.reset());
         try hrErrorOnFail(self.command_list.reset(self.command_allocator, self.pipeline_state));
 
@@ -1021,6 +1042,24 @@ const App = struct {
         log.info("down: {s}", .{@tagName(key)});
         if (key == .ESCAPE) {
             _ = wm.DestroyWindow(self.hwnd);
+        } else if (key == .PRIOR) {
+            self.pageUp();
+        } else if (key == .NEXT) {
+            self.pageDown();
+        } else if (key == .UP) {
+            self.moveCursor(.{ 0, -1 });
+        } else if (key == .DOWN) {
+            self.moveCursor(.{ 0, 1 });
+        } else if (key == .LEFT) {
+            self.moveCursor(.{ -1, 0 });
+        } else if (key == .RIGHT) {
+            self.moveCursor(.{ 1, 0 });
+        } else if (key == .END) {
+            // todo: horizontal scroll
+            self.moveCursor(.{ std.math.maxInt(i32), 0 });
+        } else if (key == .HOME) {
+            // todo: horizontal scroll
+            self.moveCursor(.{ std.math.minInt(i32) + 1, 0 });
         }
     }
 
@@ -1035,20 +1074,59 @@ const App = struct {
 
         // todo: per-pixel scroll and soft scroll
 
-        // const o: [2]u32 = file.scroll_pos;
+        // todo: see https://github.com/ziglang/zig/issues/18723 for why I must do
+        const x = file.scroll_pos[0];
+        const y = file.scroll_pos[1];
 
-        inline for (0..2) |i| {
-            if (offset[i] >= 0) {
-                file.scroll_pos[i] +|= @bitCast(offset[i]);
+        inline for (0..2) |coord| {
+            if (offset[coord] >= 0) {
+                file.scroll_pos[coord] +|= @intCast(offset[coord]);
+                const limit: u32 = @intCast(file.lines.len - @divTrunc(self.console_size[coord], 2));
+                if (file.scroll_pos[coord] > limit) {
+                    file.scroll_pos[coord] = limit;
+                }
             } else {
-                file.scroll_pos[i] -|= @bitCast(-offset[i]);
+                file.scroll_pos[coord] -|= @intCast(-offset[coord]);
             }
         }
 
-        // todo: this doesn't work, why?
-        // if (file.scroll_pos[0] == o[0] and file.scroll_pos[1] == o[1]) return;
+        if (file.scroll_pos[0] == x and file.scroll_pos[1] == y) return;
 
         self.changed.file_view = true;
+    }
+
+    fn moveCursor(self: *App, offset: [2]i32) void {
+        const file = &self.files.items[self.file_index];
+
+        for (0..file.cursors.items.len) |i| {
+            const cursor = &file.cursors.items[i];
+
+            if (offset[0] > 0) {
+                cursor.x +|= @as(u32, @intCast(offset[0]));
+                cursor.pos[0] = cursor.x;
+            } else if (offset[0] < 0) {
+                cursor.x -|= @as(u32, @intCast(-offset[0]));
+                cursor.pos[0] = cursor.x;
+            }
+
+            if (offset[1] > 0) {
+                cursor.pos[1] +|= @intCast(offset[1]);
+                // todo: scroll file
+            } else if (offset[1] < 0) {
+                cursor.pos[1] -|= @intCast(-offset[1]);
+            }
+        }
+
+        // todo: better delta
+        self.changed.file_view = true;
+    }
+
+    fn pageDown(self: *App) void {
+        self.scroll(.{ 0, @as(i32, @intCast(self.console_size[1] / 2)) });
+    }
+
+    fn pageUp(self: *App) void {
+        self.scroll(.{ 0, -@as(i32, @intCast(self.console_size[1] / 2)) });
     }
 };
 
@@ -1065,13 +1143,14 @@ const TextFile = struct {
     };
 
     pub const Cursor = struct {
-        pos: [2]u32,
-        x: u32,
+        pos: [2]u32 = .{ 0, 0 },
+        x: u32 = 0,
     };
 
     pub fn deinit(self: *TextFile, allocator: Allocator) void {
         self.clear(allocator);
         self.lines.deinit(allocator);
+        self.cursors.deinit(allocator);
     }
 
     pub fn clear(self: *TextFile, allocator: Allocator) void {
@@ -1079,6 +1158,12 @@ const TextFile = struct {
             data.deinit(allocator);
         }
         self.lines.len = 0;
+
+        // required because clear is also called when open a file
+        if (self.cursors.items.len > 0) {
+            self.cursors.items.len = 1;
+            self.cursors.items[0] = .{};
+        }
     }
 
     pub fn open(allocator: Allocator, path: []const u8) !TextFile {
@@ -1097,6 +1182,8 @@ const TextFile = struct {
         };
 
         try self.readFile(allocator);
+
+        try self.cursors.append(allocator, .{});
 
         return self;
     }
@@ -1166,37 +1253,26 @@ fn windowProc(
     const app: ?*App = @ptrFromInt(@as(usize, @bitCast(wm.GetWindowLongPtr(hwnd, .P_USERDATA))));
 
     if (umsg == wm.WM_PAINT) {
-        // var ps: gdi.PAINTSTRUCT = undefined;
-        // const hdc = gdi.BeginPaint(hwnd, &ps);
-        // // all painting occurs here, between BeginPaint and EndPaint.
-        // _ = gdi.FillRect(hdc, &ps.rcPaint, @as(gdi.HBRUSH, @ptrFromInt(@intFromEnum(wm.COLOR_WINDOWFRAME))));
-        // _ = gdi.EndPaint(hwnd, &ps);
+        // todo: better error handling
         app.?.tick() catch unreachable;
-        // {
-        //     // todo: better error handling
-        //     _ = wm.DestroyWindow(hwnd);
-        // };
-        return 0;
     } else if (umsg == wm.WM_KEYDOWN) {
         app.?.keyDown(@enumFromInt(wparam));
-        return 0;
     } else if (umsg == wm.WM_KEYUP) {
         app.?.keyUp(@enumFromInt(wparam));
-        return 0;
     } else if (umsg == wm.WM_MOUSEMOVE) {
         // const x: i16 = @truncate((lparam) & 0xffff);
         // const y: i16 = @truncate((lparam >> 16) & 0xffff);
-        return 0;
     } else if (umsg == wm.WM_MOUSEWHEEL) {
         var y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((wparam >> 16) & 0xffff)))));
         y = @divTrunc(y, 120);
         app.?.scroll(.{ 0, -y });
-        return 0;
-    } else if (umsg == wm.WM_MOUSEACTIVATE) {
-        return 0;
+        // } else if (umsg == wm.WM_MOUSEACTIVATE) {
     } else if (umsg == wm.WM_DESTROY) {
         wm.PostQuitMessage(0);
-        return 0;
+    }
+
+    if (app != null and @as(u32, @bitCast(app.?.changed)) != 0) {
+        _ = gdi.InvalidateRect(hwnd, null, 0);
     }
 
     return wm.DefWindowProc(hwnd, umsg, wparam, lparam);

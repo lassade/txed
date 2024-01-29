@@ -16,7 +16,7 @@
         {
             "label": "buildRelease",
             "type": "shell",
-            "command": "zig build -Doptimize=ReleaseFast",
+            "command": "zig build -Doptimize=ReleaseSafe",
             "problemMatcher": [],
             "group": {
                 "kind": "build",

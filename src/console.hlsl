@@ -1,7 +1,7 @@
 
 struct Char {
     uint index;
-    uint color;
+    uint flags;
 };
 
 cbuffer Config : register(b0) {
@@ -9,7 +9,11 @@ cbuffer Config : register(b0) {
     uint2 font_atlas_size;
     uint2 console_size;
     uint2 screen_size;
+
+    // color table
     float4 bg_color;
+    // todo: float4 sel_color;
+    // todo: float4 line_over_color;
 };
 StructuredBuffer<Char> console: register(t0);
 Texture2D<float> font_atlas : register(t1);
@@ -30,13 +34,14 @@ void csMain(uint3 id : SV_DispatchThreadID) {
     uint font_y = c.index / font_atlas_size.x;
     uint font_x = c.index - (font_y * font_atlas_size.x);
 
-    // todo: int flags = c.color & 0x000000ff;
-    // for things like invert bg/fg
+    bool cursor = (c.flags & 0x01000000) != 0;
+    // todo: bool selected = (c.flags & 0x02000000) != 0;
+    // todo: bool line_over = (c.flags & 0x04000000) != 0;
 
     float4 fg_color = float4(
-        float(c.color & 0xff000000 >> 24) / 255.0,
-        float(c.color & 0x00ff0000 >> 16) / 255.0,
-        float(c.color & 0x0000ff00 >> 8)  / 255.0,
+        float(c.flags & 0x00ff0000 >> 16) / 255.0,
+        float(c.flags & 0x0000ff00 >> 8) / 255.0,
+        float(c.flags & 0x000000ff)  / 255.0,
         1.0
     );
 
@@ -48,6 +53,9 @@ void csMain(uint3 id : SV_DispatchThreadID) {
 
             uint2 p0 = uint2(slot_size.x * font_x + x, slot_size.y * font_y + y);
             float alpha = font_atlas[p0];
+
+            if (cursor && x < 2) alpha = 1.0 - alpha;
+            
             screen[p1] = lerp(bg_color, fg_color, alpha);
         }
     }

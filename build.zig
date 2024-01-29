@@ -8,11 +8,11 @@ const FAILED = win.zig.FAILED;
 
 pub fn build(b: *std.Build) !void {
     // windows only
-    const target = b.resolveTargetQuery(.{
+    const target = std.zig.CrossTarget{
         .cpu_arch = .x86_64,
         .os_tag = .windows,
         .abi = .msvc,
-    });
+    };
     const optimize = b.standardOptimizeOption(.{});
 
     b.exe_dir = b.pathJoin(&.{ "zig-out", @tagName(optimize) });
@@ -182,7 +182,7 @@ const WinSdk = struct {
 
         // todo: on debug builds skip optimizations and compile debug
 
-        target.root_module.addAnonymousImport(name, .{ .root_source_file = output_file });
+        target.addAnonymousModule(name, .{ .source_file = output_file });
         //target.step.dependOn(&compile.step);
     }
 
