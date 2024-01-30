@@ -5,16 +5,19 @@ file: ?std.fs.File,
 size: u64,
 lines: std.MultiArrayList(Line),
 cursors: std.ArrayListUnmanaged(Cursor),
+// kinda odd, but the scroll is a per file thing but
+// is also associated with the `TextEditor.View`
 scroll_pos: [2]u32,
 
 pub const Line = struct {
-    data: std.ArrayListUnmanaged(u8),
+    data: std.ArrayListUnmanaged(u8) = .{},
 };
 
 // todo: cursor should be file relative
 pub const Cursor = struct {
     pos: [2]u32 = .{ 0, 0 },
     x: u32 = 0,
+    // todo: selection
 };
 
 pub fn deinit(self: *@This(), allocator: Allocator) void {
@@ -98,6 +101,103 @@ pub fn readFile(self: *@This(), allocator: Allocator) !void {
             var line = Line{ .data = .{} };
             try line.data.appendSlice(allocator, buffer_view);
             try self.lines.append(allocator, line);
+        }
+    }
+}
+
+pub fn enter(self: *@This(), allocator: Allocator) !void {
+    for (0..self.cursors.items.len) |i| {
+        const cursor = &self.cursors.items[i];
+
+        var new_line = Line{};
+
+        const curr_line = &self.lines.items(.data)[cursor.pos[1]];
+        // todo: respect tabulation
+
+        if (cursor.x < curr_line.items.len) {
+            try new_line.data.appendSlice(allocator, curr_line.items[cursor.x..]);
+            curr_line.items.len = cursor.x;
+        }
+
+        // todo: proper cursor movement
+        cursor.pos[1] += 1;
+        cursor.pos[0] = 0;
+        cursor.x = 0;
+
+        try self.lines.insert(allocator, cursor.pos[1], new_line);
+    }
+}
+
+pub fn insertChar(self: *@This(), allocator: Allocator, unicode: u32) !void {
+    var buffer: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(@truncate(unicode), &buffer);
+
+    // todo: ignore back space
+    if (len == 1 and std.ascii.isControl(buffer[0])) insert: {
+        if (buffer[0] == '\t') {
+            break :insert;
+        } else if (buffer[0] == std.ascii.control_code.bs) {
+            try self.backspace(allocator);
+        } else if (buffer[0] == '\r' or buffer[0] == '\n') {
+            try self.enter(allocator);
+        }
+        return;
+    }
+
+    for (0..self.cursors.items.len) |i| {
+        const cursor = &self.cursors.items[i];
+        const line = &self.lines.items(.data)[cursor.pos[1]];
+        try line.insertSlice(allocator, cursor.x, buffer[0..len]);
+
+        // todo: proper cursor movement
+        cursor.x += 1;
+        cursor.pos[0] = cursor.x;
+    }
+}
+
+pub fn delete(self: *@This(), allocator: Allocator) !void {
+    for (0..self.cursors.items.len) |i| {
+        const cursor = &self.cursors.items[i];
+        const line_number = cursor.pos[1];
+        const line = &self.lines.items(.data)[line_number];
+        if (cursor.x == line.items.len or line.items.len == 0) {
+            if (line_number < self.lines.len) {
+                const next_line_number = line_number + 1;
+                var next_line = self.lines.items(.data)[next_line_number];
+                _ = try line.appendSlice(allocator, next_line.items);
+                self.lines.orderedRemove(next_line_number);
+                next_line.deinit(allocator);
+            }
+        } else {
+            _ = line.orderedRemove(cursor.x);
+        }
+    }
+}
+
+pub fn backspace(self: *@This(), allocator: Allocator) !void {
+    // todo: proper curso moviment
+    for (0..self.cursors.items.len) |i| {
+        const cursor = &self.cursors.items[i];
+        const line_number = cursor.pos[1];
+        const line = &self.lines.items(.data)[line_number];
+        if (cursor.x == 0) {
+            if (line_number > 0) {
+                // remember the current line that will be deallocated
+                var curr_line = line.*;
+                cursor.pos[1] -= 1;
+                if (line.items.len > 0) {
+                    const prev_line = &self.lines.items(.data)[cursor.pos[1]];
+                    cursor.x = @intCast(prev_line.items.len);
+                    cursor.pos[0] = cursor.x;
+                    try prev_line.appendSlice(allocator, line.items);
+                    self.lines.orderedRemove(line_number);
+                }
+                curr_line.deinit(allocator);
+            }
+        } else {
+            cursor.x -= 1;
+            cursor.pos[0] = cursor.x;
+            _ = line.orderedRemove(cursor.x);
         }
     }
 }

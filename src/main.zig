@@ -1097,10 +1097,18 @@ const App = struct {
         log.info("up: {s}", .{@tagName(key)});
     }
 
+    fn insertChar(self: *App, unicode: u32) void {
+        const file = &self.files.items[self.file_index];
+        file.insertChar(self.allocator, unicode) catch unreachable;
+
+        // todo: better delta
+        self.changed.file_view = true;
+    }
+
     fn scrollRelative(self: *App, offset: i32x2) void {
         if (offset[0] == 0 and offset[1] == 0) return;
 
-        var file = &self.files.items[self.file_index];
+        const file = &self.files.items[self.file_index];
 
         // todo: per-pixel scroll and soft scroll
 
@@ -1217,6 +1225,8 @@ fn windowProc(
     wparam: wf.WPARAM,
     lparam: wf.LPARAM,
 ) callconv(@import("std").os.windows.WINAPI) wf.LRESULT {
+    //log.info("windowProc: 0x{x}", .{umsg});
+
     if (umsg == wm.WM_CREATE) {
         // save the App* passed in to CreateWindow
         const create_struct: *wm.CREATESTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
@@ -1233,6 +1243,8 @@ fn windowProc(
         app.?.keyDown(@enumFromInt(wparam));
     } else if (umsg == wm.WM_KEYUP) {
         app.?.keyUp(@enumFromInt(wparam));
+    } else if (umsg == wm.WM_CHAR) {
+        app.?.insertChar(@truncate(wparam));
     } else if (umsg == wm.WM_MOUSEMOVE) {
         // const x: i16 = @truncate((lparam) & 0xffff);
         // const y: i16 = @truncate((lparam >> 16) & 0xffff);
