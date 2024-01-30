@@ -74,23 +74,38 @@ const App = struct {
         uv: [2]f32,
     };
 
+    const ColorEnum = enum(u4) {
+        text = 0,
+        bg,
+    };
+
     const Char = packed struct {
         index: u32 = 0,
-        color: u24 = 0xff_ff_ff,
 
-        cursor: bool = false,
+        // colors
+        fg_color: ColorEnum = .text,
+        bg_color: ColorEnum = .bg,
+
+        // various styles
+        cursor_line: bool = false,
+        cursor_block: bool = false,
+        box: bool = false,
+
+        scope: bool = false,
+        scope_hint: bool = false,
+
         selected: bool = false,
         line_over: bool = false,
 
-        unused: u5 = 0,
+        unused: u17 = 0,
     };
 
     const Config = extern struct {
         slot_size: [2]u32,
         font_atlas_size: [2]u32,
         console_size: [2]u32,
-        screen_size: [2]u32,
-        bg_color: [4]f32,
+        // note aligment requirement
+        colors: [16]@Vector(4, f32),
     };
 
     const ChangedFlags = packed struct(u32) {
@@ -565,14 +580,17 @@ const App = struct {
 
         // update config buffer
         {
-            const result = try staging_buffer.alloc(@sizeOf(Config));
-            @memcpy(result.cpu_slice, std.mem.asBytes(&Config{
+            var config = Config{
                 .slot_size = self.slot_size,
                 .font_atlas_size = self.font_atlas_slot_count_per_dim,
                 .console_size = self.console_size,
-                .screen_size = self.screen_size,
-                .bg_color = .{ 39.0 / 255.0, 40.0 / 255.0, 34.0 / 255.0, 1.0 },
-            }));
+                .colors = undefined,
+            };
+            config.colors[@intFromEnum(ColorEnum.text)] = .{ 1.0, 1.0, 1.0, 1.0 };
+            config.colors[@intFromEnum(ColorEnum.bg)] = .{ 39.0 / 255.0, 40.0 / 255.0, 34.0 / 255.0, 1.0 };
+
+            const result = try staging_buffer.alloc(@sizeOf(Config));
+            @memcpy(result.cpu_slice, std.mem.asBytes(&config));
             self.command_list.copyBufferRegion(
                 self.config_buffer.heap,
                 0,
@@ -728,8 +746,8 @@ const App = struct {
             &dx12.D3D12_RESOURCE_DESC{
                 .Dimension = .TEXTURE2D,
                 .Alignment = 0,
-                .Width = @intCast(self.screen_size[0]),
-                .Height = @intCast(self.screen_size[1]),
+                .Width = @intCast(self.console_size[0] * self.slot_size[0]),
+                .Height = @intCast(self.console_size[1] * self.slot_size[1]),
                 .DepthOrArraySize = 1,
                 .MipLevels = 1,
                 .Format = .R8G8B8A8_UNORM,
@@ -868,7 +886,7 @@ const App = struct {
             }
         }
 
-        // todo: display cursors
+        // display cursors
         for (0..file.cursors.items.len) |j| {
             const cursor = &file.cursors.items[j];
             const lines_on_screen: u32 = @intCast(file.lines.len -| file.scroll_pos[1]);
@@ -886,7 +904,7 @@ const App = struct {
             }
 
             i = self.console_size[0] * cursor.pos[1] + cursor.x;
-            self.console[i].cursor = true;
+            self.console[i].cursor_line = true;
         }
 
         self.changed.file_view = false;
@@ -972,7 +990,15 @@ const App = struct {
                 .Type = .SUBRESOURCE_INDEX,
                 .Anonymous = .{ .SubresourceIndex = 0 },
             },
-            null,
+            // todo: soft scroll
+            &dx12.D3D12_BOX{
+                .left = 0,
+                .top = 0,
+                .right = self.screen_size[0],
+                .bottom = self.screen_size[1],
+                .front = 0,
+                .back = 1,
+            },
         );
 
         self.command_list.resourceBarrier(
@@ -1139,9 +1165,9 @@ const TextFile = struct {
 
     pub const Line = struct {
         data: std.ArrayListUnmanaged(u8),
-        //offset: u64,
     };
 
+    // todo: cursor should be file relative
     pub const Cursor = struct {
         pos: [2]u32 = .{ 0, 0 },
         x: u32 = 0,
