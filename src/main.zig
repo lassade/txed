@@ -23,6 +23,8 @@ const GPUBuffer = help.GPUBuffer;
 const GPUStagingBuffer = help.GPUStagingBuffer;
 const GPUDescHeap = help.GPUDescHeap;
 
+const TextFile = @import("TextFile.zig");
+
 const Font = struct {
     info: tt.FontInfo,
     data: []u8,
@@ -111,6 +113,7 @@ const App = struct {
     const ChangedFlags = packed struct(u32) {
         console: bool = false,
         file_view: bool = false,
+        // todo: line: bool = false,
         unused: u30 = 0,
     };
 
@@ -887,23 +890,17 @@ const App = struct {
         }
 
         // display cursors
-        for (0..file.cursors.items.len) |j| {
-            const cursor = &file.cursors.items[j];
-            const lines_on_screen: u32 = @intCast(file.lines.len -| file.scroll_pos[1]);
-            if (cursor.pos[1] > lines_on_screen) {
-                cursor.pos[1] = lines_on_screen;
-            }
+        for (file.cursors.items) |cursor| {
+            if (cursor.x < file.scroll_pos[0]) continue;
+            if (cursor.pos[1] < file.scroll_pos[1]) continue;
 
-            const line_number = file.scroll_pos[1] + cursor.pos[1];
-            const line_len = file.lines.items(.data)[line_number].items.len;
-            const line_len_on_screen: u32 = @intCast(line_len -| file.scroll_pos[0]);
-            if (cursor.pos[0] > line_len_on_screen) {
-                cursor.x = line_len_on_screen;
-            } else {
-                cursor.x = cursor.pos[0];
-            }
+            const x = cursor.x - file.scroll_pos[0];
+            if (x >= self.console_size[0]) continue;
 
-            i = self.console_size[0] * cursor.pos[1] + cursor.x;
+            const y = cursor.pos[1] - file.scroll_pos[1];
+            if (y >= self.console_size[1]) continue;
+
+            i = self.console_size[0] * y + x;
             self.console[i].cursor_line = true;
         }
 
@@ -1081,11 +1078,9 @@ const App = struct {
         } else if (key == .RIGHT) {
             self.moveCursor(.{ 1, 0 });
         } else if (key == .END) {
-            // todo: horizontal scroll
-            self.moveCursor(.{ std.math.maxInt(i32), 0 });
+            self.putCursor(.end);
         } else if (key == .HOME) {
-            // todo: horizontal scroll
-            self.moveCursor(.{ std.math.minInt(i32) + 1, 0 });
+            self.putCursor(.start);
         }
     }
 
@@ -1123,9 +1118,20 @@ const App = struct {
 
     fn moveCursor(self: *App, offset: [2]i32) void {
         const file = &self.files.items[self.file_index];
-
         for (0..file.cursors.items.len) |i| {
             const cursor = &file.cursors.items[i];
+
+            if (offset[1] > 0) {
+                cursor.pos[1] +|= @intCast(offset[1]);
+                // todo: scroll file
+            } else if (offset[1] < 0) {
+                cursor.pos[1] -|= @intCast(-offset[1]);
+            }
+
+            const lines_count: u32 = @intCast(file.lines.len);
+            if (cursor.pos[1] > lines_count) {
+                cursor.pos[1] = lines_count;
+            }
 
             if (offset[0] > 0) {
                 cursor.x +|= @as(u32, @intCast(offset[0]));
@@ -1135,16 +1141,39 @@ const App = struct {
                 cursor.pos[0] = cursor.x;
             }
 
-            if (offset[1] > 0) {
-                cursor.pos[1] +|= @intCast(offset[1]);
-                // todo: scroll file
-            } else if (offset[1] < 0) {
-                cursor.pos[1] -|= @intCast(-offset[1]);
+            const line_len: u32 = @intCast(file.lines.items(.data)[cursor.pos[1]].items.len);
+            if (cursor.pos[0] > line_len) {
+                cursor.x = line_len;
+                // always change the desired location on horizontal moviment
+                if (offset[0] != 0) cursor.pos[0] = cursor.x;
+            } else {
+                cursor.x = cursor.pos[0];
             }
         }
 
         // todo: better delta
         self.changed.file_view = true;
+    }
+
+    fn putCursor(self: *App, loc: enum(u32) { start = 0, end = std.math.maxInt(u32) }) void {
+        const file = &self.files.items[self.file_index];
+        for (0..file.cursors.items.len) |i| {
+            const cursor = &file.cursors.items[i];
+            const x: u32 = @intFromEnum(loc);
+            cursor.pos[0] = x;
+
+            const line_len: u32 = @intCast(file.lines.items(.data)[cursor.pos[1]].items.len);
+            if (cursor.pos[0] > line_len) {
+                cursor.x = line_len;
+            } else {
+                cursor.x = cursor.pos[0];
+            }
+        }
+
+        // todo: better delta
+        self.changed.file_view = true;
+
+        // todo: horizontal scroll
     }
 
     fn pageDown(self: *App) void {
@@ -1153,113 +1182,6 @@ const App = struct {
 
     fn pageUp(self: *App) void {
         self.scroll(.{ 0, -@as(i32, @intCast(self.console_size[1] / 2)) });
-    }
-};
-
-const TextFile = struct {
-    file: ?std.fs.File,
-    size: u64,
-    lines: std.MultiArrayList(Line),
-    cursors: std.ArrayListUnmanaged(Cursor),
-    scroll_pos: [2]u32,
-
-    pub const Line = struct {
-        data: std.ArrayListUnmanaged(u8),
-    };
-
-    // todo: cursor should be file relative
-    pub const Cursor = struct {
-        pos: [2]u32 = .{ 0, 0 },
-        x: u32 = 0,
-    };
-
-    pub fn deinit(self: *TextFile, allocator: Allocator) void {
-        self.clear(allocator);
-        self.lines.deinit(allocator);
-        self.cursors.deinit(allocator);
-    }
-
-    pub fn clear(self: *TextFile, allocator: Allocator) void {
-        for (self.lines.items(.data)) |*data| {
-            data.deinit(allocator);
-        }
-        self.lines.len = 0;
-
-        // required because clear is also called when open a file
-        if (self.cursors.items.len > 0) {
-            self.cursors.items.len = 1;
-            self.cursors.items[0] = .{};
-        }
-    }
-
-    pub fn open(allocator: Allocator, path: []const u8) !TextFile {
-        const realpath = try std.fs.cwd().realpathAlloc(allocator, path);
-        defer allocator.free(realpath);
-
-        const file = try std.fs.openFileAbsolute(realpath, .{ .mode = .read_write });
-        const size: u64 = @intCast(try file.getEndPos());
-
-        var self = TextFile{
-            .file = file,
-            .size = size,
-            .lines = .{},
-            .cursors = .{},
-            .scroll_pos = .{ 0, 0 },
-        };
-
-        try self.readFile(allocator);
-
-        try self.cursors.append(allocator, .{});
-
-        return self;
-    }
-
-    pub fn readFile(self: *TextFile, allocator: Allocator) !void {
-        if (self.file) |file| {
-            try file.seekTo(0);
-
-            const buffer = try allocator.alloc(u8, @intCast(self.size));
-            defer allocator.free(buffer);
-
-            self.clear(allocator);
-
-            _ = try file.readAll(buffer);
-
-            // break down the file into multiple lines
-            var buffer_view = buffer;
-            while (std.mem.indexOfScalar(u8, buffer_view, '\n')) |line_end| {
-                // account for the \r\n line end style
-                var len = line_end;
-                if (line_end > 0 and buffer_view[line_end - 1] == '\r') {
-                    len -= 1;
-                }
-
-                // todo: handle the case where the line is very long
-
-                var line = Line{ .data = .{} };
-                try line.data.ensureTotalCapacity(allocator, len);
-                line.data.appendSliceAssumeCapacity(buffer_view[0..len]);
-                try self.lines.append(allocator, line);
-
-                buffer_view = buffer_view[line_end + 1 ..];
-
-                // insert an empty last line
-                if (buffer_view.len == 0) {
-                    try self.lines.append(allocator, Line{ .data = .{} });
-                    return;
-                }
-            }
-
-            if (buffer_view.len > 0) {
-                var line = Line{ .data = .{} };
-                try line.data.appendSlice(allocator, buffer_view);
-                try self.lines.append(allocator, line);
-            }
-        }
-    }
-
-    pub fn flush(self: *TextFile) !void {
-        _ = self; // autofix
     }
 };
 
