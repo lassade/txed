@@ -1089,15 +1089,14 @@ const App = struct {
         log.info("up: {s}", .{@tagName(key)});
     }
 
-    fn scroll(self: *App, offset: [2]i32) void {
-        if (self.file_index >= self.files.items.len) return;
+    fn scrollRelative(self: *App, offset: [2]i32) void {
+        if (offset[0] == 0 and offset[1] == 0) return;
+
         var file = &self.files.items[self.file_index];
 
         // todo: per-pixel scroll and soft scroll
 
-        // todo: see https://github.com/ziglang/zig/issues/18723 for why I must do
-        const x = file.scroll_pos[0];
-        const y = file.scroll_pos[1];
+        const o = file.scroll_pos;
 
         inline for (0..2) |coord| {
             if (offset[coord] >= 0) {
@@ -1111,26 +1110,25 @@ const App = struct {
             }
         }
 
-        if (file.scroll_pos[0] == x and file.scroll_pos[1] == y) return;
+        if (file.scroll_pos[0] == o[0] and file.scroll_pos[1] == o[0]) return;
 
         self.changed.file_view = true;
     }
 
     fn moveCursor(self: *App, offset: [2]i32) void {
+        if (offset[0] == 0 and offset[1] == 0) return;
+
+        var scroll_y: i32 = 0;
+
         const file = &self.files.items[self.file_index];
         for (0..file.cursors.items.len) |i| {
             const cursor = &file.cursors.items[i];
 
+            // move
             if (offset[1] > 0) {
                 cursor.pos[1] +|= @intCast(offset[1]);
-                // todo: scroll file
             } else if (offset[1] < 0) {
                 cursor.pos[1] -|= @intCast(-offset[1]);
-            }
-
-            const lines_count: u32 = @intCast(file.lines.len);
-            if (cursor.pos[1] > lines_count) {
-                cursor.pos[1] = lines_count;
             }
 
             if (offset[0] > 0) {
@@ -1141,6 +1139,12 @@ const App = struct {
                 cursor.pos[0] = cursor.x;
             }
 
+            // validate
+            const lines_count: u32 = @intCast(file.lines.len);
+            if (cursor.pos[1] > lines_count) {
+                cursor.pos[1] = lines_count;
+            }
+
             const line_len: u32 = @intCast(file.lines.items(.data)[cursor.pos[1]].items.len);
             if (cursor.pos[0] > line_len) {
                 cursor.x = line_len;
@@ -1149,7 +1153,33 @@ const App = struct {
             } else {
                 cursor.x = cursor.pos[0];
             }
+
+            // scroll
+            // todo: horizontal scroll
+            // if (offset[1] != 0) {
+            //     if (cursor.x < file.scroll_pos[0]) {
+            //         scroll_offset[0] = @min(scroll_offset[0], -@as(i32, @intCast(cursor.x + 8)));
+            //     } else {
+            //         const x = cursor.x - file.scroll_pos[0];
+            //         if (x >= self.console_size[0]) {
+            //             scroll_offset[0] = @max(scroll_offset[0], @as(i32, @intCast(x + 8)));
+            //         }
+            //     }
+            // }
+
+            if (offset[1] != 0) {
+                if (cursor.pos[1] < file.scroll_pos[1]) {
+                    scroll_y = @min(scroll_y, -@as(i32, @intCast(file.scroll_pos[1] - cursor.pos[1])));
+                } else {
+                    const y = cursor.pos[1] - file.scroll_pos[1];
+                    if (y >= self.console_size[1]) {
+                        scroll_y = @max(scroll_y, @as(i32, @intCast(y - self.console_size[1] + 1)));
+                    }
+                }
+            }
         }
+
+        self.scrollRelative(.{ 0, scroll_y });
 
         // todo: better delta
         self.changed.file_view = true;
@@ -1177,11 +1207,11 @@ const App = struct {
     }
 
     fn pageDown(self: *App) void {
-        self.scroll(.{ 0, @as(i32, @intCast(self.console_size[1] / 2)) });
+        self.moveCursor(.{ 0, @as(i32, @intCast(self.console_size[1] / 2)) });
     }
 
     fn pageUp(self: *App) void {
-        self.scroll(.{ 0, -@as(i32, @intCast(self.console_size[1] / 2)) });
+        self.moveCursor(.{ 0, -@as(i32, @intCast(self.console_size[1] / 2)) });
     }
 };
 
@@ -1213,7 +1243,7 @@ fn windowProc(
     } else if (umsg == wm.WM_MOUSEWHEEL) {
         var y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((wparam >> 16) & 0xffff)))));
         y = @divTrunc(y, 120);
-        app.?.scroll(.{ 0, -y });
+        app.?.scrollRelative(.{ 0, -y });
         // } else if (umsg == wm.WM_MOUSEACTIVATE) {
     } else if (umsg == wm.WM_DESTROY) {
         wm.PostQuitMessage(0);
