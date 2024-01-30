@@ -25,6 +25,11 @@ const GPUDescHeap = help.GPUDescHeap;
 
 const TextFile = @import("TextFile.zig");
 
+const u32x2 = @Vector(2, u32);
+const i32x2 = @Vector(2, i32);
+const f32x2 = @Vector(2, f32);
+const f32x4 = @Vector(4, f32);
+
 const Font = struct {
     info: tt.FontInfo,
     data: []u8,
@@ -103,11 +108,11 @@ const App = struct {
     };
 
     const Config = extern struct {
-        slot_size: [2]u32,
-        font_atlas_size: [2]u32,
-        console_size: [2]u32,
+        slot_size: u32x2,
+        font_atlas_size: u32x2,
+        console_size: u32x2,
         // note aligment requirement
-        colors: [16]@Vector(4, f32),
+        colors: [16]f32x4,
     };
 
     const ChangedFlags = packed struct(u32) {
@@ -121,7 +126,7 @@ const App = struct {
 
     hwnd: wf.HWND,
 
-    screen_size: [2]u32,
+    screen_size: u32x2,
     aspect_ratio: f32,
     viewport: dx12.D3D12_VIEWPORT,
     scissor_rect: wf.RECT,
@@ -151,12 +156,12 @@ const App = struct {
     font: Font,
     font_size: f32,
     font_scale: f32,
-    slot_size: [2]u32,
+    slot_size: u32x2,
     font_atlas: *dx12.ID3D12Resource,
     font_atlas_desc_offset: u64,
-    font_atlas_size: [2]u32,
-    font_atlas_slot_pos: [2]u32,
-    font_atlas_slot_count_per_dim: [2]u32,
+    font_atlas_size: u32x2,
+    font_atlas_slot_pos: u32x2,
+    font_atlas_slot_count_per_dim: u32x2,
     font_atlas_slot_count: u32,
     unicode_map: std.ArrayListUnmanaged(u32),
 
@@ -164,7 +169,8 @@ const App = struct {
 
     console: []Char,
     console_buffer: GPUBuffer,
-    console_size: [2]u32,
+    console_size: u32x2,
+    console_size_on_screen: u32x2,
 
     console_output: *dx12.ID3D12Resource,
     console_output_desc_offset: u64,
@@ -172,7 +178,7 @@ const App = struct {
     files: std.ArrayListUnmanaged(TextFile) = .{},
     file_index: u32 = 0xffffffff,
 
-    fn init(allocator: Allocator, hwnd: wf.HWND, size: [2]u32) !App {
+    fn init(allocator: Allocator, hwnd: wf.HWND, size: u32x2) !App {
         var dxgi_factory_flags: u32 = 0;
 
         if (builtin.mode == .Debug) {
@@ -501,6 +507,7 @@ const App = struct {
             .console = undefined,
             .console_buffer = undefined,
             .console_size = undefined,
+            .console_size_on_screen = undefined,
 
             .console_output = undefined,
             .console_output_desc_offset = undefined,
@@ -545,14 +552,15 @@ const App = struct {
         self.slot_size[0] = @intFromFloat(@ceil(@as(f32, @floatFromInt(h_metrics.advance_width)) * self.font_scale));
         self.slot_size[1] = @intFromFloat(@ceil(@as(f32, @floatFromInt(v_metrics.ascent - v_metrics.descent)) * self.font_scale) + 1.0);
         self.font_atlas_slot_pos = .{ 1, 0 };
-        self.font_atlas_slot_count_per_dim[0] = self.font_atlas_size[0] / self.slot_size[0];
-        self.font_atlas_slot_count_per_dim[1] = self.font_atlas_size[1] / self.slot_size[1];
+        self.font_atlas_slot_count_per_dim = self.font_atlas_size / self.slot_size;
         self.font_atlas_slot_count = self.font_atlas_slot_count_per_dim[0] * self.font_atlas_slot_count_per_dim[1];
         try self.unicode_map.append(allocator, 0xffff_ffff);
 
         // update console
         // todo: free previous console on resize
-        self.console_size = .{ self.screen_size[0] / self.slot_size[0] + 1, self.screen_size[1] / self.slot_size[1] + 1 };
+        const slots_on_screen = @as(f32x2, @floatFromInt(self.screen_size)) / @as(f32x2, @floatFromInt(self.slot_size));
+        self.console_size = @intFromFloat(@ceil(slots_on_screen));
+        self.console_size_on_screen = @intFromFloat(@floor(slots_on_screen));
         self.console = try allocator.alloc(Char, self.console_size[0] * self.console_size[1]);
         const console_byte_len: u32 = @intCast(@sizeOf(Char) * self.console.len);
         // todo: console buffer only grows
@@ -1070,17 +1078,17 @@ const App = struct {
         } else if (key == .NEXT) {
             self.pageDown();
         } else if (key == .UP) {
-            self.moveCursor(.{ 0, -1 });
+            self.moveCursor(.{ 0, -1 }, .normal);
         } else if (key == .DOWN) {
-            self.moveCursor(.{ 0, 1 });
+            self.moveCursor(.{ 0, 1 }, .normal);
         } else if (key == .LEFT) {
-            self.moveCursor(.{ -1, 0 });
+            self.moveCursor(.{ -1, 0 }, .normal);
         } else if (key == .RIGHT) {
-            self.moveCursor(.{ 1, 0 });
+            self.moveCursor(.{ 1, 0 }, .normal);
         } else if (key == .END) {
-            self.putCursor(.end);
+            self.moveCursor(.{ std.math.maxInt(i32), 0 }, .absolute);
         } else if (key == .HOME) {
-            self.putCursor(.start);
+            self.moveCursor(.{ std.math.minInt(i32) + 1, 0 }, .absolute);
         }
     }
 
@@ -1089,7 +1097,7 @@ const App = struct {
         log.info("up: {s}", .{@tagName(key)});
     }
 
-    fn scrollRelative(self: *App, offset: [2]i32) void {
+    fn scrollRelative(self: *App, offset: i32x2) void {
         if (offset[0] == 0 and offset[1] == 0) return;
 
         var file = &self.files.items[self.file_index];
@@ -1098,16 +1106,21 @@ const App = struct {
 
         const o = file.scroll_pos;
 
-        inline for (0..2) |coord| {
-            if (offset[coord] >= 0) {
-                file.scroll_pos[coord] +|= @intCast(offset[coord]);
-                const limit: u32 = @intCast(file.lines.len - @divTrunc(self.console_size[coord], 2));
-                if (file.scroll_pos[coord] > limit) {
-                    file.scroll_pos[coord] = limit;
-                }
-            } else {
-                file.scroll_pos[coord] -|= @intCast(-offset[coord]);
+        if (offset[0] > 0) {
+            file.scroll_pos[0] +|= @intCast(offset[0]);
+            // todo: limit the horizontal scroll
+        } else {
+            file.scroll_pos[0] -|= @intCast(-offset[0]);
+        }
+
+        if (offset[1] > 0) {
+            file.scroll_pos[1] +|= @intCast(offset[1]);
+            const limit: u32 = @intCast(file.lines.len - @divTrunc(self.console_size[1], 2));
+            if (file.scroll_pos[1] > limit) {
+                file.scroll_pos[1] = limit;
             }
+        } else {
+            file.scroll_pos[1] -|= @intCast(-offset[1]);
         }
 
         if (file.scroll_pos[0] == o[0] and file.scroll_pos[1] == o[0]) return;
@@ -1115,10 +1128,14 @@ const App = struct {
         self.changed.file_view = true;
     }
 
-    fn moveCursor(self: *App, offset: [2]i32) void {
+    fn moveCursor(
+        self: *App,
+        offset: i32x2,
+        mod: enum { normal, absolute, jump },
+    ) void {
         if (offset[0] == 0 and offset[1] == 0) return;
 
-        var scroll_y: i32 = 0;
+        var scroll: i32x2 = @splat(0);
 
         const file = &self.files.items[self.file_index];
         for (0..file.cursors.items.len) |i| {
@@ -1148,70 +1165,49 @@ const App = struct {
             const line_len: u32 = @intCast(file.lines.items(.data)[cursor.pos[1]].items.len);
             if (cursor.pos[0] > line_len) {
                 cursor.x = line_len;
-                // always change the desired location on horizontal moviment
-                if (offset[0] != 0) cursor.pos[0] = cursor.x;
+                if (mod != .absolute) {
+                    // change the desired location on horizontal moviment
+                    if (offset[0] != 0) cursor.pos[0] = cursor.x;
+                }
             } else {
                 cursor.x = cursor.pos[0];
             }
 
-            // scroll
-            // todo: horizontal scroll
-            // if (offset[1] != 0) {
-            //     if (cursor.x < file.scroll_pos[0]) {
-            //         scroll_offset[0] = @min(scroll_offset[0], -@as(i32, @intCast(cursor.x + 8)));
-            //     } else {
-            //         const x = cursor.x - file.scroll_pos[0];
-            //         if (x >= self.console_size[0]) {
-            //             scroll_offset[0] = @max(scroll_offset[0], @as(i32, @intCast(x + 8)));
-            //         }
-            //     }
-            // }
+            if (cursor.x < file.scroll_pos[0]) {
+                scroll[0] = @min(scroll[0], -@as(i32, @intCast(file.scroll_pos[0] - cursor.x)) - 8);
+            } else {
+                const x = cursor.x - file.scroll_pos[0];
+                if (x >= self.console_size_on_screen[0]) {
+                    var h = @divTrunc(x, self.console_size_on_screen[0]) * self.console_size_on_screen[0];
+                    if (h > 9) h -= 8;
+                    scroll[0] = @max(scroll[0], @as(i32, @intCast(h)));
+                }
+            }
 
             if (offset[1] != 0) {
                 if (cursor.pos[1] < file.scroll_pos[1]) {
-                    scroll_y = @min(scroll_y, -@as(i32, @intCast(file.scroll_pos[1] - cursor.pos[1])));
+                    scroll[1] = @min(scroll[1], -@as(i32, @intCast(file.scroll_pos[1] - cursor.pos[1])));
                 } else {
                     const y = cursor.pos[1] - file.scroll_pos[1];
-                    if (y >= self.console_size[1]) {
-                        scroll_y = @max(scroll_y, @as(i32, @intCast(y - self.console_size[1] + 1)));
+                    if (y >= self.console_size_on_screen[1]) {
+                        scroll[1] = @max(scroll[1], @as(i32, @intCast(y - self.console_size_on_screen[1] + 1)));
                     }
                 }
             }
         }
 
-        self.scrollRelative(.{ 0, scroll_y });
+        self.scrollRelative(scroll);
 
         // todo: better delta
         self.changed.file_view = true;
-    }
-
-    fn putCursor(self: *App, loc: enum(u32) { start = 0, end = std.math.maxInt(u32) }) void {
-        const file = &self.files.items[self.file_index];
-        for (0..file.cursors.items.len) |i| {
-            const cursor = &file.cursors.items[i];
-            const x: u32 = @intFromEnum(loc);
-            cursor.pos[0] = x;
-
-            const line_len: u32 = @intCast(file.lines.items(.data)[cursor.pos[1]].items.len);
-            if (cursor.pos[0] > line_len) {
-                cursor.x = line_len;
-            } else {
-                cursor.x = cursor.pos[0];
-            }
-        }
-
-        // todo: better delta
-        self.changed.file_view = true;
-
-        // todo: horizontal scroll
     }
 
     fn pageDown(self: *App) void {
-        self.moveCursor(.{ 0, @as(i32, @intCast(self.console_size[1] / 2)) });
+        self.moveCursor(.{ 0, @as(i32, @intCast(self.console_size[1] / 2)) }, .normal);
     }
 
     fn pageUp(self: *App) void {
-        self.moveCursor(.{ 0, -@as(i32, @intCast(self.console_size[1] / 2)) });
+        self.moveCursor(.{ 0, -@as(i32, @intCast(self.console_size[1] / 2)) }, .normal);
     }
 };
 
@@ -1242,9 +1238,10 @@ fn windowProc(
         // const y: i16 = @truncate((lparam >> 16) & 0xffff);
     } else if (umsg == wm.WM_MOUSEWHEEL) {
         var y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((wparam >> 16) & 0xffff)))));
-        y = @divTrunc(y, 120);
+        y = @divTrunc(y, 120) * 3;
         app.?.scrollRelative(.{ 0, -y });
-        // } else if (umsg == wm.WM_MOUSEACTIVATE) {
+    } else if (umsg == wm.WM_MOUSEACTIVATE) {
+        //
     } else if (umsg == wm.WM_DESTROY) {
         wm.PostQuitMessage(0);
     }
