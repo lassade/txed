@@ -23,12 +23,9 @@ const GPUBuffer = help.GPUBuffer;
 const GPUStagingBuffer = help.GPUStagingBuffer;
 const GPUDescHeap = help.GPUDescHeap;
 
+const m = @import("math.zig");
+const vec2 = m.Vector(2);
 const TextFile = @import("TextFile.zig");
-
-const u32x2 = @Vector(2, u32);
-const i32x2 = @Vector(2, i32);
-const f32x2 = @Vector(2, f32);
-const f32x4 = @Vector(4, f32);
 
 const Font = struct {
     info: tt.FontInfo,
@@ -108,30 +105,30 @@ const App = struct {
     };
 
     const Config = extern struct {
-        slot_size: u32x2,
-        font_atlas_size: u32x2,
-        console_size: u32x2,
+        slot_size: m.U32x2,
+        font_atlas_size: m.U32x2,
+        console_size: m.U32x2,
         // note aligment requirement
-        colors: [16]f32x4,
+        colors: [16]m.F32x4,
     };
 
-    const ChangedFlags = packed struct(u32) {
+    const Flags = packed struct(u32) {
+        animating: bool = false,
         console: bool = false,
         file_view: bool = false,
         // todo: line: bool = false,
-        unused: u30 = 0,
+        unused: u29 = 0,
     };
-
-    allocator: Allocator,
 
     hwnd: wf.HWND,
 
-    screen_size: u32x2,
+    allocator: Allocator,
+    flags: Flags = .{},
+
+    screen_size: m.U32x2,
     aspect_ratio: f32,
     viewport: dx12.D3D12_VIEWPORT,
     scissor_rect: wf.RECT,
-
-    changed: ChangedFlags = .{},
 
     device: *dx12.ID3D12Device,
     command_queue: *dx12.ID3D12CommandQueue,
@@ -156,12 +153,12 @@ const App = struct {
     font: Font,
     font_size: f32,
     font_scale: f32,
-    slot_size: u32x2,
+    slot_size: m.U32x2,
     font_atlas: *dx12.ID3D12Resource,
     font_atlas_desc_offset: u64,
-    font_atlas_size: u32x2,
-    font_atlas_slot_pos: u32x2,
-    font_atlas_slot_count_per_dim: u32x2,
+    font_atlas_size: m.U32x2,
+    font_atlas_slot_pos: m.U32x2,
+    font_atlas_slot_count_per_dim: m.U32x2,
     font_atlas_slot_count: u32,
     unicode_map: std.ArrayListUnmanaged(u32),
 
@@ -169,16 +166,18 @@ const App = struct {
 
     console: []Char,
     console_buffer: GPUBuffer,
-    console_size: u32x2,
-    console_size_on_screen: u32x2,
+    console_size: m.U32x2,
+    console_size_on_screen: m.U32x2,
 
     console_output: *dx12.ID3D12Resource,
     console_output_desc_offset: u64,
 
-    files: std.ArrayListUnmanaged(TextFile) = .{},
-    file_index: u32 = 0xffffffff,
+    file: TextFile = .{},
+    target_scroll_pos: m.F32x2 = @splat(0.0),
+    scroll_vel: m.F32x2 = @splat(0.0),
+    scroll_pos: m.F32x2 = @splat(0.0),
 
-    fn init(allocator: Allocator, hwnd: wf.HWND, size: u32x2) !App {
+    fn init(allocator: Allocator, hwnd: wf.HWND, size: m.U32x2) !App {
         var dxgi_factory_flags: u32 = 0;
 
         if (builtin.mode == .Debug) {
@@ -558,7 +557,7 @@ const App = struct {
 
         // update console
         // todo: free previous console on resize
-        const slots_on_screen = @as(f32x2, @floatFromInt(self.screen_size)) / @as(f32x2, @floatFromInt(self.slot_size));
+        const slots_on_screen = @as(m.F32x2, @floatFromInt(self.screen_size)) / @as(m.F32x2, @floatFromInt(self.slot_size));
         self.console_size = @intFromFloat(@ceil(slots_on_screen));
         self.console_size_on_screen = @intFromFloat(@floor(slots_on_screen));
         self.console = try allocator.alloc(Char, self.console_size[0] * self.console_size[1]);
@@ -586,8 +585,6 @@ const App = struct {
         );
         errdefer allocator.free(self.console);
         errdefer self.console_buffer.deinit();
-
-        self.clearConsole();
 
         // update config buffer
         {
@@ -790,13 +787,8 @@ const App = struct {
             srv_cpu.offset(self.console_output_desc_offset),
         );
 
-        if (TextFile.open(allocator, "src/main.zig")) |file| {
-            try self.files.append(allocator, file);
-            self.file_index = 0;
-            self.changed.file_view = true;
-        } else |_| {
-            // do nothing
-        }
+        self.file = TextFile.open(allocator, "src/main.zig") catch .{};
+        self.flags.file_view = true;
 
         // upload resources
         {
@@ -817,11 +809,8 @@ const App = struct {
 
         _ = self.console_output.release();
 
-        for (self.files.items) |*file| {
-            file.flush() catch {};
-            file.deinit(self.allocator);
-        }
-        self.files.deinit(self.allocator);
+        self.file.flush() catch {};
+        self.file.deinit(self.allocator);
 
         self.allocator.free(self.console);
         self.console_buffer.deinit();
@@ -857,19 +846,8 @@ const App = struct {
         _ = self.device.release();
     }
 
-    fn clearConsole(self: *App) void {
-        @memset(self.console, Char{});
-        self.changed.console = true;
-    }
-
-    fn viewFile(self: *App, file_index: u32) void {
-        if (self.files.items.len <= file_index) {
-            self.clearConsole();
-            return;
-        }
-
-        const file = &self.files.items[file_index];
-        self.file_index = file_index;
+    fn viewFile(self: *App) void {
+        const scroll_pos: m.U32x2 = @intFromFloat(self.target_scroll_pos);
 
         var i: usize = 0;
         for (0..self.console_size[1]) |y| {
@@ -877,12 +855,12 @@ const App = struct {
                 var char = Char{ .index = 0 };
 
                 const pos = [2]usize{
-                    x + file.scroll_pos[0],
-                    y + file.scroll_pos[1],
+                    x + scroll_pos[0],
+                    y + scroll_pos[1],
                 };
 
-                if (pos[1] < file.lines.len) {
-                    const line = file.lines.items(.data)[pos[1]];
+                if (pos[1] < self.file.lines.len) {
+                    const line = self.file.lines.items(.data)[pos[1]];
                     if (pos[0] < line.items.len) {
                         // todo: read unicode char
                         const unicode: u32 = line.items[pos[0]];
@@ -898,36 +876,41 @@ const App = struct {
         }
 
         // display cursors
-        for (file.cursors.items) |cursor| {
-            if (cursor.x < file.scroll_pos[0]) continue;
-            if (cursor.pos[1] < file.scroll_pos[1]) continue;
+        for (self.file.cursors.items) |cursor| {
+            if (cursor.x < scroll_pos[0]) continue;
+            if (cursor.pos[1] < scroll_pos[1]) continue;
 
-            const x = cursor.x - file.scroll_pos[0];
+            const x = cursor.x - scroll_pos[0];
             if (x >= self.console_size[0]) continue;
 
-            const y = cursor.pos[1] - file.scroll_pos[1];
+            const y = cursor.pos[1] - scroll_pos[1];
             if (y >= self.console_size[1]) continue;
 
             i = self.console_size[0] * y + x;
             self.console[i].cursor_line = true;
         }
 
-        self.changed.file_view = false;
-        self.changed.console = true;
+        self.flags.file_view = false;
+        self.flags.console = true;
     }
 
-    fn tick(self: *App) !void {
+    fn tick(self: *App, dt: f32) !void {
+        _ = self; // autofix
+        _ = dt; // autofix
+    }
+
+    fn render(self: *App) !void {
         try hrErrorOnFail(self.command_allocator.reset());
         try hrErrorOnFail(self.command_list.reset(self.command_allocator, self.pipeline_state));
 
         const staging_buffer = &self.staging_buffers[self.frame_index];
 
-        if (self.changed.file_view) {
-            self.viewFile(self.file_index);
-            self.changed.file_view = false;
+        if (self.flags.file_view) {
+            self.viewFile();
+            self.flags.file_view = false;
         }
 
-        if (self.changed.console) {
+        if (self.flags.console) {
             const console_bytes = std.mem.sliceAsBytes(self.console);
             const result = try staging_buffer.alloc(console_bytes.len);
             @memcpy(result.cpu_slice, console_bytes);
@@ -938,7 +921,7 @@ const App = struct {
                 result.offset,
                 @intCast(console_bytes.len),
             );
-            self.changed.console = false;
+            self.flags.console = false;
         }
 
         self.command_list.setComputeRootSignature(self.root_sig);
@@ -1071,9 +1054,7 @@ const App = struct {
 
     fn keyDown(self: *App, key: kbm.VIRTUAL_KEY) void {
         log.info("down: {s}", .{@tagName(key)});
-        if (key == .ESCAPE) {
-            _ = wm.DestroyWindow(self.hwnd);
-        } else if (key == .PRIOR) {
+        if (key == .PRIOR) {
             self.pageUp();
         } else if (key == .NEXT) {
             self.pageDown();
@@ -1096,141 +1077,101 @@ const App = struct {
 
     fn keyUp(self: *App, key: kbm.VIRTUAL_KEY) void {
         _ = self;
-        log.info("up: {s}", .{@tagName(key)});
+        _ = key;
     }
 
     fn deleteChar(self: *App) void {
-        self.files.items[self.file_index].delete(self.allocator) catch unreachable;
+        self.file.delete(self.allocator) catch unreachable;
         // todo: better delta
-        self.changed.file_view = true;
+        self.flags.file_view = true;
 
-        self.scrollToCursor();
+        self.focusView();
     }
 
     fn insertChar(self: *App, unicode: u32) void {
-        const file = &self.files.items[self.file_index];
-        file.insertChar(self.allocator, unicode) catch unreachable;
-
-        self.scrollToCursor();
+        self.file.insertChar(self.allocator, unicode) catch unreachable;
+        self.focusView();
 
         // todo: better delta
-        self.changed.file_view = true;
+        self.flags.file_view = true;
     }
 
-    fn scrollToCursor(self: *App) void {
-        var scroll: i32x2 = @splat(0);
+    fn focusView(self: *App) void {
+        var offset: m.I32x2 = @splat(0);
 
-        const file = &self.files.items[self.file_index];
-        for (0..file.cursors.items.len) |i| {
-            const cursor = &file.cursors.items[i];
+        const scroll_pos: m.U32x2 = @intFromFloat(self.target_scroll_pos);
+        for (0..self.file.cursors.items.len) |i| {
+            const cursor = &self.file.cursors.items[i];
 
-            if (cursor.x < file.scroll_pos[0]) {
-                scroll[0] = @min(scroll[0], -@as(i32, @intCast(file.scroll_pos[0] - cursor.x)) - 8);
+            if (cursor.x < scroll_pos[0]) {
+                const x = @as(i32, @intCast(scroll_pos[0] - cursor.x + self.console_size_on_screen[0]));
+                offset[0] = @min(offset[0], -x - 8);
             } else {
-                const x = cursor.x - file.scroll_pos[0];
+                const x = cursor.x - scroll_pos[0];
                 if (x >= self.console_size_on_screen[0]) {
                     var h = @divTrunc(x, self.console_size_on_screen[0]) * self.console_size_on_screen[0];
                     if (h > 9) h -= 8;
-                    scroll[0] = @max(scroll[0], @as(i32, @intCast(h)));
+                    offset[0] = @max(offset[0], @as(i32, @intCast(h)));
                 }
             }
 
-            if (cursor.pos[1] < file.scroll_pos[1]) {
-                scroll[1] = @min(scroll[1], -@as(i32, @intCast(file.scroll_pos[1] - cursor.pos[1])));
+            if (cursor.pos[1] < scroll_pos[1]) {
+                offset[1] = @min(offset[1], -@as(i32, @intCast(scroll_pos[1] - cursor.pos[1])));
             } else {
-                const y = cursor.pos[1] - file.scroll_pos[1];
+                const y = cursor.pos[1] - scroll_pos[1];
                 if (y >= self.console_size_on_screen[1]) {
-                    scroll[1] = @max(scroll[1], @as(i32, @intCast(y - self.console_size_on_screen[1] + 1)));
+                    offset[1] = @max(offset[1], @as(i32, @intCast(y - self.console_size_on_screen[1] + 1)));
                 }
             }
         }
 
-        if (!self.scrollRelative(scroll)) return;
+        if (!self.scrollRelative(offset)) return;
 
         // todo: better delta
-        self.changed.file_view = true;
+        self.flags.file_view = true;
     }
 
-    fn scrollRelative(self: *App, offset: i32x2) bool {
+    fn scrollRelative(self: *App, offset: m.I32x2) bool {
         if (offset[0] == 0 and offset[1] == 0) return false;
-
-        const file = &self.files.items[self.file_index];
 
         // todo: per-pixel scroll and soft scroll
 
-        const o = file.scroll_pos;
+        var scroll_pos: m.U32x2 = @intFromFloat(self.target_scroll_pos);
+        const x = scroll_pos[0];
+        const y = scroll_pos[1];
 
         if (offset[0] > 0) {
-            file.scroll_pos[0] +|= @intCast(offset[0]);
+            scroll_pos[0] +|= @intCast(offset[0]);
             // todo: limit the horizontal scroll
         } else {
-            file.scroll_pos[0] -|= @intCast(-offset[0]);
+            scroll_pos[0] -|= @intCast(-offset[0]);
         }
 
         if (offset[1] > 0) {
-            file.scroll_pos[1] +|= @intCast(offset[1]);
-            const limit: u32 = @intCast(file.lines.len - @divTrunc(self.console_size[1], 2));
-            if (file.scroll_pos[1] > limit) {
-                file.scroll_pos[1] = limit;
+            scroll_pos[1] +|= @intCast(offset[1]);
+            const limit: u32 = @intCast(self.file.lines.len - @divTrunc(self.console_size[1], 2));
+            if (scroll_pos[1] > limit) {
+                scroll_pos[1] = limit;
             }
         } else {
-            file.scroll_pos[1] -|= @intCast(-offset[1]);
+            scroll_pos[1] -|= @intCast(-offset[1]);
         }
 
-        if (file.scroll_pos[0] == o[0] and file.scroll_pos[1] == o[0]) return false;
+        if (scroll_pos[0] == x and scroll_pos[1] == y) return false;
 
-        self.changed.file_view = true;
+        self.target_scroll_pos = @floatFromInt(scroll_pos);
+        self.flags.file_view = true;
         return true;
     }
 
-    fn moveCursor(
-        self: *App,
-        offset: i32x2,
-        mod: enum { normal, absolute, jump },
-    ) void {
+    fn moveCursor(self: *App, offset: [2]i32, mod: TextFile.MoveCursorMode) void {
         if (offset[0] == 0 and offset[1] == 0) return;
 
-        const file = &self.files.items[self.file_index];
-        for (0..file.cursors.items.len) |i| {
-            const cursor = &file.cursors.items[i];
-
-            // move
-            if (offset[1] > 0) {
-                cursor.pos[1] +|= @intCast(offset[1]);
-            } else if (offset[1] < 0) {
-                cursor.pos[1] -|= @intCast(-offset[1]);
-            }
-
-            if (offset[0] > 0) {
-                cursor.x +|= @as(u32, @intCast(offset[0]));
-                cursor.pos[0] = cursor.x;
-            } else if (offset[0] < 0) {
-                cursor.x -|= @as(u32, @intCast(-offset[0]));
-                cursor.pos[0] = cursor.x;
-            }
-
-            // validate
-            const lines_count: u32 = @intCast(file.lines.len);
-            if (cursor.pos[1] > lines_count) {
-                cursor.pos[1] = lines_count;
-            }
-
-            const line_len: u32 = @intCast(file.lines.items(.data)[cursor.pos[1]].items.len);
-            if (cursor.pos[0] > line_len) {
-                cursor.x = line_len;
-                if (mod != .absolute) {
-                    // change the desired location on horizontal moviment
-                    if (offset[0] != 0) cursor.pos[0] = cursor.x;
-                }
-            } else {
-                cursor.x = cursor.pos[0];
-            }
-        }
-
-        self.scrollToCursor();
+        self.file.moveCursor(offset, mod);
+        self.focusView();
 
         // todo: better delta
-        self.changed.file_view = true;
+        self.flags.file_view = true;
     }
 
     fn pageDown(self: *App) void {
@@ -1242,59 +1183,13 @@ const App = struct {
     }
 };
 
-fn windowProc(
-    hwnd: wf.HWND,
-    umsg: u32,
-    wparam: wf.WPARAM,
-    lparam: wf.LPARAM,
-) callconv(@import("std").os.windows.WINAPI) wf.LRESULT {
-    //log.info("windowProc: 0x{x}", .{umsg});
-
-    if (umsg == wm.WM_CREATE) {
-        // save the App* passed in to CreateWindow
-        const create_struct: *wm.CREATESTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
-        _ = wm.SetWindowLongPtr(hwnd, .P_USERDATA, @bitCast(@intFromPtr(create_struct.lpCreateParams)));
-        return 0;
-    }
-
-    const app: ?*App = @ptrFromInt(@as(usize, @bitCast(wm.GetWindowLongPtr(hwnd, .P_USERDATA))));
-
-    if (umsg == wm.WM_PAINT) {
-        // todo: better error handling
-        app.?.tick() catch unreachable;
-    } else if (umsg == wm.WM_KEYDOWN) {
-        app.?.keyDown(@enumFromInt(wparam));
-    } else if (umsg == wm.WM_KEYUP) {
-        app.?.keyUp(@enumFromInt(wparam));
-    } else if (umsg == wm.WM_CHAR) {
-        app.?.insertChar(@truncate(wparam));
-    } else if (umsg == wm.WM_MOUSEMOVE) {
-        // const x: i16 = @truncate((lparam) & 0xffff);
-        // const y: i16 = @truncate((lparam >> 16) & 0xffff);
-    } else if (umsg == wm.WM_MOUSEWHEEL) {
-        var y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((wparam >> 16) & 0xffff)))));
-        y = @divTrunc(y, 120) * 3;
-        _ = app.?.scrollRelative(.{ 0, -y });
-    } else if (umsg == wm.WM_MOUSEACTIVATE) {
-        //
-    } else if (umsg == wm.WM_DESTROY) {
-        wm.PostQuitMessage(0);
-    }
-
-    if (app != null and @as(u32, @bitCast(app.?.changed)) != 0) {
-        _ = gdi.InvalidateRect(hwnd, null, 0);
-    }
-
-    return wm.DefWindowProc(hwnd, umsg, wparam, lparam);
-}
-
 pub fn main() !void {
     const hinstance = win.system.library_loader.GetModuleHandle(null).?;
 
     const class_name = L("WindowClass");
     const wc = wm.WNDCLASS{
         .style = wm.WNDCLASS_STYLES.initFlags(.{ .VREDRAW = 1, .HREDRAW = 1 }),
-        .lpfnWndProc = &windowProc,
+        .lpfnWndProc = &wm.DefWindowProc,
         .cbClsExtra = 0,
         .cbWndExtra = 0,
         .hInstance = hinstance,
@@ -1334,6 +1229,7 @@ pub fn main() !void {
         hinstance, // instance handle
         &app, // additional application data
     ).?;
+    defer _ = wm.DestroyWindow(hwnd);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) @panic("memory leak");
@@ -1342,11 +1238,76 @@ pub fn main() !void {
     defer app.deinit();
 
     _ = wm.ShowWindow(hwnd, .SHOWDEFAULT);
+    // _ = wm.SetTimer(hwnd, 0, 16, null);
 
     // run the message loop.
     var msg: wm.MSG = undefined;
-    while (wm.GetMessage(&msg, null, 0, 0) > 0) {
-        _ = wm.TranslateMessage(&msg);
-        _ = wm.DispatchMessage(&msg);
+    var timer = try std.time.Timer.start();
+    var dt: f32 = 0.016_666;
+    while (true) {
+        var has_msg = false;
+        if (app.flags.animating) {
+            // when the app is animataing switch to the non-blocking function
+            has_msg = wm.PeekMessage(&msg, null, 0, 0, .REMOVE) > 0;
+        } else {
+            has_msg = wm.GetMessage(&msg, null, 0, 0) > 0;
+        }
+
+        if (has_msg) {
+            _ = wm.TranslateMessage(&msg);
+            _ = wm.DispatchMessage(&msg);
+            // std.log.info("msg: {d}", .{msg.message});
+
+            switch (msg.message) {
+                wm.WM_NCLBUTTONDOWN => break,
+                // wm.WM_TIMER => {},
+                //wm.WM_PAINT => try app.render(),
+                wm.WM_KEYDOWN => {
+                    const key: kbm.VIRTUAL_KEY = @enumFromInt(msg.wParam);
+                    if (key == .ESCAPE) {
+                        break;
+                    }
+                    app.keyDown(@enumFromInt(msg.wParam));
+                },
+                wm.WM_KEYUP => app.keyUp(@enumFromInt(msg.wParam)),
+                wm.WM_CHAR => app.insertChar(@truncate(msg.wParam)),
+                wm.WM_MOUSEMOVE => {
+                    // const x: i16 = @truncate((lParam) & 0xffff);
+                    // const y: i16 = @truncate((lParam >> 16) & 0xffff);
+                },
+                wm.WM_MOUSEWHEEL => {
+                    var y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((msg.wParam >> 16) & 0xffff)))));
+                    y = @divTrunc(y, 120) * 3;
+                    _ = app.scrollRelative(.{ 0, -y });
+                },
+                wm.WM_MOUSEACTIVATE => {},
+                else => {},
+            }
+            // when not animating render the app
+            if (!app.flags.animating and @as(u32, @bitCast(app.flags)) != 0) {
+                try app.render();
+            }
+        } else {
+            // game loop here
+
+            // frame cap
+            while (true) {
+                const t0 = timer.read();
+                if (t0 >= 16_666_666) break;
+                const rem = 16_666_666 - t0;
+                if (rem > 500) {
+                    // sleep for 1/4 of the remaining time, to keep things more accurate
+                    // while keeping cpu usage as low as possible
+                    std.time.sleep(rem / 4);
+                } else {
+                    // kill time
+                    continue;
+                }
+            }
+
+            dt = @as(f32, @floatFromInt(timer.lap())) * 0.000_000_001;
+            try app.tick(dt);
+            try app.render();
+        }
     }
 }

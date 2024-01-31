@@ -1,16 +1,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-file: ?std.fs.File,
-size: u64,
-lines: std.MultiArrayList(Line),
-cursors: std.ArrayListUnmanaged(Cursor),
-// kinda odd, but the scroll is a per file thing but
-// is also associated with the `TextEditor.View`
-scroll_pos: [2]u32,
+file: ?std.fs.File = null,
+size: u64 = 0,
+lines: std.MultiArrayList(Line) = .{},
+cursors: std.ArrayListUnmanaged(Cursor) = .{},
 
 pub const Line = struct {
     data: std.ArrayListUnmanaged(u8) = .{},
+    // todo: len: usize, // actuall line lenght per unicode character
 };
 
 // todo: cursor should be file relative
@@ -46,16 +44,8 @@ pub fn open(allocator: Allocator, path: []const u8) !@This() {
     const file = try std.fs.openFileAbsolute(realpath, .{ .mode = .read_write });
     const size: u64 = @intCast(try file.getEndPos());
 
-    var self = @This(){
-        .file = file,
-        .size = size,
-        .lines = .{},
-        .cursors = .{},
-        .scroll_pos = .{ 0, 0 },
-    };
-
+    var self = @This(){ .file = file, .size = size };
     try self.readFile(allocator);
-
     try self.cursors.append(allocator, .{});
 
     return self;
@@ -101,6 +91,50 @@ pub fn readFile(self: *@This(), allocator: Allocator) !void {
             var line = Line{ .data = .{} };
             try line.data.appendSlice(allocator, buffer_view);
             try self.lines.append(allocator, line);
+        }
+    }
+}
+
+pub const MoveCursorMode = enum { normal, absolute, jump };
+
+pub fn moveCursor(self: *@This(), offset: [2]i32, mod: MoveCursorMode) void {
+    if (offset[0] == 0 and offset[1] == 0) return;
+
+    // todo: account for unicode chars
+
+    for (0..self.cursors.items.len) |i| {
+        const cursor = &self.cursors.items[i];
+
+        // move
+        if (offset[1] > 0) {
+            cursor.pos[1] +|= @intCast(offset[1]);
+        } else if (offset[1] < 0) {
+            cursor.pos[1] -|= @intCast(-offset[1]);
+        }
+
+        if (offset[0] > 0) {
+            cursor.x +|= @as(u32, @intCast(offset[0]));
+            cursor.pos[0] = cursor.x;
+        } else if (offset[0] < 0) {
+            cursor.x -|= @as(u32, @intCast(-offset[0]));
+            cursor.pos[0] = cursor.x;
+        }
+
+        // validate
+        const lines_count: u32 = @intCast(self.lines.len);
+        if (cursor.pos[1] > lines_count) {
+            cursor.pos[1] = lines_count;
+        }
+
+        const line_len: u32 = @intCast(self.lines.items(.data)[cursor.pos[1]].items.len);
+        if (cursor.pos[0] > line_len) {
+            cursor.x = line_len;
+            if (mod != .absolute) {
+                // change the desired location on horizontal moviment
+                if (offset[0] != 0) cursor.pos[0] = cursor.x;
+            }
+        } else {
+            cursor.x = cursor.pos[0];
         }
     }
 }
