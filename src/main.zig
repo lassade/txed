@@ -1085,6 +1085,8 @@ const App = struct {
             self.moveCursor(.{ -1, 0 }, .normal);
         } else if (key == .RIGHT) {
             self.moveCursor(.{ 1, 0 }, .normal);
+        } else if (key == .DELETE) {
+            self.deleteChar();
         } else if (key == .END) {
             self.moveCursor(.{ std.math.maxInt(i32), 0 }, .absolute);
         } else if (key == .HOME) {
@@ -1097,16 +1099,60 @@ const App = struct {
         log.info("up: {s}", .{@tagName(key)});
     }
 
+    fn deleteChar(self: *App) void {
+        self.files.items[self.file_index].delete(self.allocator) catch unreachable;
+        // todo: better delta
+        self.changed.file_view = true;
+
+        self.scrollToCursor();
+    }
+
     fn insertChar(self: *App, unicode: u32) void {
         const file = &self.files.items[self.file_index];
         file.insertChar(self.allocator, unicode) catch unreachable;
+
+        self.scrollToCursor();
 
         // todo: better delta
         self.changed.file_view = true;
     }
 
-    fn scrollRelative(self: *App, offset: i32x2) void {
-        if (offset[0] == 0 and offset[1] == 0) return;
+    fn scrollToCursor(self: *App) void {
+        var scroll: i32x2 = @splat(0);
+
+        const file = &self.files.items[self.file_index];
+        for (0..file.cursors.items.len) |i| {
+            const cursor = &file.cursors.items[i];
+
+            if (cursor.x < file.scroll_pos[0]) {
+                scroll[0] = @min(scroll[0], -@as(i32, @intCast(file.scroll_pos[0] - cursor.x)) - 8);
+            } else {
+                const x = cursor.x - file.scroll_pos[0];
+                if (x >= self.console_size_on_screen[0]) {
+                    var h = @divTrunc(x, self.console_size_on_screen[0]) * self.console_size_on_screen[0];
+                    if (h > 9) h -= 8;
+                    scroll[0] = @max(scroll[0], @as(i32, @intCast(h)));
+                }
+            }
+
+            if (cursor.pos[1] < file.scroll_pos[1]) {
+                scroll[1] = @min(scroll[1], -@as(i32, @intCast(file.scroll_pos[1] - cursor.pos[1])));
+            } else {
+                const y = cursor.pos[1] - file.scroll_pos[1];
+                if (y >= self.console_size_on_screen[1]) {
+                    scroll[1] = @max(scroll[1], @as(i32, @intCast(y - self.console_size_on_screen[1] + 1)));
+                }
+            }
+        }
+
+        if (!self.scrollRelative(scroll)) return;
+
+        // todo: better delta
+        self.changed.file_view = true;
+    }
+
+    fn scrollRelative(self: *App, offset: i32x2) bool {
+        if (offset[0] == 0 and offset[1] == 0) return false;
 
         const file = &self.files.items[self.file_index];
 
@@ -1131,9 +1177,10 @@ const App = struct {
             file.scroll_pos[1] -|= @intCast(-offset[1]);
         }
 
-        if (file.scroll_pos[0] == o[0] and file.scroll_pos[1] == o[0]) return;
+        if (file.scroll_pos[0] == o[0] and file.scroll_pos[1] == o[0]) return false;
 
         self.changed.file_view = true;
+        return true;
     }
 
     fn moveCursor(
@@ -1142,8 +1189,6 @@ const App = struct {
         mod: enum { normal, absolute, jump },
     ) void {
         if (offset[0] == 0 and offset[1] == 0) return;
-
-        var scroll: i32x2 = @splat(0);
 
         const file = &self.files.items[self.file_index];
         for (0..file.cursors.items.len) |i| {
@@ -1180,31 +1225,9 @@ const App = struct {
             } else {
                 cursor.x = cursor.pos[0];
             }
-
-            if (cursor.x < file.scroll_pos[0]) {
-                scroll[0] = @min(scroll[0], -@as(i32, @intCast(file.scroll_pos[0] - cursor.x)) - 8);
-            } else {
-                const x = cursor.x - file.scroll_pos[0];
-                if (x >= self.console_size_on_screen[0]) {
-                    var h = @divTrunc(x, self.console_size_on_screen[0]) * self.console_size_on_screen[0];
-                    if (h > 9) h -= 8;
-                    scroll[0] = @max(scroll[0], @as(i32, @intCast(h)));
-                }
-            }
-
-            if (offset[1] != 0) {
-                if (cursor.pos[1] < file.scroll_pos[1]) {
-                    scroll[1] = @min(scroll[1], -@as(i32, @intCast(file.scroll_pos[1] - cursor.pos[1])));
-                } else {
-                    const y = cursor.pos[1] - file.scroll_pos[1];
-                    if (y >= self.console_size_on_screen[1]) {
-                        scroll[1] = @max(scroll[1], @as(i32, @intCast(y - self.console_size_on_screen[1] + 1)));
-                    }
-                }
-            }
         }
 
-        self.scrollRelative(scroll);
+        self.scrollToCursor();
 
         // todo: better delta
         self.changed.file_view = true;
@@ -1251,7 +1274,7 @@ fn windowProc(
     } else if (umsg == wm.WM_MOUSEWHEEL) {
         var y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((wparam >> 16) & 0xffff)))));
         y = @divTrunc(y, 120) * 3;
-        app.?.scrollRelative(.{ 0, -y });
+        _ = app.?.scrollRelative(.{ 0, -y });
     } else if (umsg == wm.WM_MOUSEACTIVATE) {
         //
     } else if (umsg == wm.WM_DESTROY) {
